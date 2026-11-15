@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-antigravity2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi provider extension for Antigravity / Google Cloud Code Assist",
   "type": "module",
   "author": "gdd00",
