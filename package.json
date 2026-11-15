@@ -1,0 +1,68 @@
+{
+  "name": "pi-provider-antigravity2",
+  "version": "0.1.0",
+  "description": "Pi provider extension for Antigravity / Google Cloud Code Assist",
+  "type": "module",
+  "author": "gdd00",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gdd00/pi-provider-antigravity2.git"
+  },
+  "homepage": "https://github.com/gdd00/pi-provider-antigravity2#readme",
+  "bugs": {
+    "url": "https://github.com/gdd00/pi-provider-antigravity2/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "antigravity",
+    "gemini",
+    "claude",
+    "oauth",
+    "provider"
+  ],
+  "files": [
+    "pi-provider-antigravity2",
+    "README.md",
+    "README-zh-hans.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./pi-provider-antigravity2/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "prepublishOnly": "npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  }
+}

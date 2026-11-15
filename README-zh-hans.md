@@ -1,0 +1,222 @@
+# pi-provider-antigravity2
+
+[English](README.md) | **简体中文**
+
+[![Pi Package](https://img.shields.io/badge/Pi-Package-6366F1?style=flat)](https://pi.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Erasable-3178C6?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-10B981?style=flat)](#)
+
+面向 [Pi](https://github.com/earendil-works/pi) 的 **Antigravity（Google Cloud Code Assist `v1internal`）** Provider 扩展，让你可以在 Pi 中直接使用 Antigravity 订阅配额调用 Gemini / Claude 等模型。
+
+> [!CAUTION]
+> **免责声明**：本项目为**非官方**社区维护的 Provider 扩展，仅用于个人学习与技术研究。使用非官方客户端访问 Google Cloud Code Assist / Antigravity 可能违反 Google 服务条款，并存在配额回收或 Google 账号受限风险，请自行承担使用风险。本仓库**不内置** Google OAuth 客户端凭证；执行 `/login antigravity` 或自动刷新 Refresh Token 前，请先按下方 [OAuth 客户端凭证](#-oauth-客户端凭证登录依赖-agy-客户端) 步骤完成配置。
+
+---
+
+## 🧠 核心原则：100% 原生 Pi Core，完全不依赖 `agy`
+
+本扩展**纯粹是一个 Pi Provider / Auth / 协议适配层**：
+
+- **⚙️ 完全使用 Pi Core 的 Agent Loop 与内置工具**：所有对话循环、上下文管理、思考过程，以及 `read`、`bash`、`edit`、`write` 等原生工具调用，**100% 由 `pi` 自身执行**。
+- **🚫 零 `agy` 依赖**：绝不调用 `/usr/bin/agy` 或任何外部 CLI 子进程（全库不使用 `child_process`），也没有第三方运行时 npm 依赖。
+- **🌐 直连 Cloud Code Assist HTTP/SSE**：直接通过原生 `fetch` 对接 `https://daily-cloudcode-pa.googleapis.com/v1internal`，原生支持流式输出、`xhigh` 思考等级（如 `thinkingLevel: 100`）、多轮 `thoughtSignature` 签名保留与跨模型族工具历史兼容。
+
+---
+
+## 🔐 登录与凭据管理
+
+扩展内置完整的 Google OAuth PKCE 登录与凭据维护链路（位于 [auth.ts](pi-provider-antigravity2/auth.ts)）：
+
+### 🔑 OAuth 客户端凭证（登录依赖 `agy` 客户端）
+
+本扩展**不内置** Google OAuth 客户端凭证。交互式 `/login antigravity` 登录以及 Refresh Token 自动续期**依赖本机官方 `agy`（`antigravity-cli`）客户端提供的 OAuth 客户端凭证**（由于 Antigravity 使用 `aicode`、`cclog`、`experimentsandconfigs` 等 Google 受限内部 Scope 与官方回调 `https://antigravity.google/oauth-callback`，个人在 Google Cloud Console 新建的普通 OAuth 应用无法通过授权校验）。
+
+**通过 `/login antigravity` 自动提取与保存（推荐）：**
+
+未提前配置凭证时，直接运行 `/login antigravity`：
+1. 扩展会提示你粘贴 `client_id` 或**完整的 `agy` 登录网址**（从 `agy` 登录页面或浏览器地址栏直接整条复制即可，扩展会自动解析出 `client_id`）。
+2. 扩展会**自动读取本机磁盘上的 `agy` 二进制文件**（纯文件读取，不启动 `agy` 子进程），提取并向 Google 验证匹配出对应的 35 位 `GOCSPX-...` Secret，然后**自动持久化保存到 `~/.pi/agent/pi-provider-antigravity.json`**（权限 `0600`），后续登录与自动刷新均无需再输入。
+3. 若当前机器未安装 `agy`（如纯无头服务器），扩展会回退为提示输入一次 `client_secret` 并同样自动持久化保存。
+
+**手动提取与配置（可选）：**
+
+1. **获取 `ANTIGRAVITY_CLIENT_ID`**：执行一次 `agy` 登录，从浏览器打开的 Google OAuth 授权地址中复制 `client_id=...` 参数（`strings "$(which agy)"` 会列出多个内置 Google 客户端 ID，以实际登录 URL 中的为准）：
+   ```bash
+   strings "$(which agy)" | grep -oE '[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com' | sort -u
+   ```
+2. **获取 `ANTIGRAVITY_CLIENT_SECRET`**：由于 `agy` 是 Go 编译的二进制文件，`.rodata` 段字符串紧密拼接没有 `\0` 结尾，直接用 `GOCSPX-[A-Za-z0-9_-]+` 会把紧邻下一条字符串的字母吞进去导致长度不对；需按 **35 位精确长度**（`GOCSPX-` + 28 位）匹配，并用虚拟 `code` 向 `oauth2.googleapis.com/token` 探测配对（返回 `invalid_grant` 即匹配成功，`invalid_client` 为其他客户端的 Secret）：
+   ```bash
+   node -e '
+   const fs = require("node:fs");
+   const txt = fs.readFileSync(process.argv[1], "latin1");
+   const secrets = [...new Set(txt.match(/GOCSPX-[A-Za-z0-9_-]{28}/g) || [])];
+   (async () => {
+     for (const s of secrets) {
+       const r = await fetch("https://oauth2.googleapis.com/token", {
+         method: "POST",
+         headers: { "Content-Type": "application/x-www-form-urlencoded" },
+         body: new URLSearchParams({
+           client_id: process.argv[2],
+           client_secret: s,
+           code: "probe",
+           grant_type: "authorization_code",
+           redirect_uri: "https://antigravity.google/oauth-callback",
+         }),
+       });
+       const j = await r.json();
+       if (j.error === "invalid_grant") { console.log(s); break; }
+     }
+   })();
+   ' "$(which agy)" "你的CLIENT_ID.apps.googleusercontent.com"
+   ```
+
+**配置方式（二选一）：**
+
+- **方式 1 — 写入持久化配置文件**（推荐，一次配置长期生效；路径为 `$PI_CODING_AGENT_DIR/pi-provider-antigravity.json`，默认 `~/.pi/agent/pi-provider-antigravity.json`）：
+  ```json
+  {
+    "oauthClientId": "你的CLIENT_ID.apps.googleusercontent.com",
+    "oauthClientSecret": "GOCSPX-你的CLIENT_SECRET"
+  }
+  ```
+- **方式 2 — 通过环境变量传入**（优先级高于配置文件）：
+  ```bash
+  export ANTIGRAVITY_CLIENT_ID="你的CLIENT_ID.apps.googleusercontent.com"
+  export ANTIGRAVITY_CLIENT_SECRET="GOCSPX-你的CLIENT_SECRET"
+  ```
+
+> [!NOTE]
+> 如果你仅向 `auth.json` 写入现成的有效 `access` token（`ya29...`，且不依赖 `refresh`），在 Token 过期前（约 1 小时）无需配置上述 OAuth 客户端凭证即可正常请求，但过期后无法自动续期。
+
+1. **交互式登录**：在 Pi 中执行 `/login antigravity`，扩展会生成 PKCE（`S256`）授权链接，粘贴回调授权码后换取 OAuth Token。
+2. **Project ID 自动解析**：自动请求 `v1internal:loadCodeAssist` 获取账户绑定的 `cloudaicompanionProject`；若查询失败或未分配则安全回落至 `"aicode-consumers"`。
+3. **Refresh Token 容错规范化**：自动清理 Refresh Token 中误带的前导连字符（如 `-1//...` 规范化为 `1//...`）及多余空白。
+4. **无感刷新与 401 恢复**：
+   - 将 `{ token, projectId }` 打包保存在凭据的 `access` 中，并在每次请求/刷新时自动继承已知的 `projectId`。
+   - 冷启动或流式对话遇到 `401` 时自动触发单次 Token 刷新恢复并重试。
+   - 支持纯无头冷启动：从 `~/.pi/agent/models-store.json` 或 `~/.pi/agent/auth.json` 预引导模型目录，避免离线或首次启动时报 `Unknown provider "antigravity"`。
+
+---
+
+## 🚨 为什么直接用 Pi 原版提示词会触发 429？
+
+通过抓包对比、字段消融测试与字符级二分实验确认，**Antigravity 服务端明确存在针对 Pi 系统提示词的特征检测拦截**：
+
+- 当请求顶层带有 `"requestType": "agent"`，且 `request.systemInstruction` 中包含 Pi 默认系统提示词特征短语时：
+  - `prefix[:43]`（`"You are a coding assistant running inside p"`）→ **HTTP 200**
+  - `prefix[:44]`（`"You are a coding assistant running inside pi"`）→ **立即返回 HTTP 429**
+  - `"running inside pi, a coding agent harness"` → **立即返回 HTTP 429**
+- 这类拦截会立即返回合成的 `429 RESOURCE_EXHAUSTED`（且响应头**没有** `Retry-After`，错误体**没有** `quotaResetDelay` / `retryDelay`），并非账号真实配额耗尽。
+
+---
+
+## ✂️ 本扩展如何修改系统提示词（仅切换为 `antigravity` 时生效）
+
+为了在绕过 429 检测的同时**完整保留 Pi 的全部能力与上下文**，本扩展采用了**仅在出站请求阶段局部适配**的设计：
+
+### 1. 🔒 严格隔离的作用范围
+
+- **当且仅当 Pi 切换到 `antigravity` Provider 时**，请求才会经过 `pi.registerProvider("antigravity", { streamSimple })` → `streamAntigravity` → `buildAntigravityRequestBody`（[builder.ts](pi-provider-antigravity2/builder.ts)），在构造发往 Antigravity 的 JSON 载荷时对 `request.systemInstruction` 做适配。
+- `session_start` 与 `before_agent_start` 钩子**只做读取与配置文件校验**，不修改 Pi 内存中的系统提示词。
+- **切换到 OpenAI、Anthropic 等其他任何 Provider 时，Pi 的系统提示词一字不动。**
+
+### 2. 🧩 最小化改写，完整保留实时上下文
+
+- **仅修改开头导语（`preamble`）**，或按配置的正则规则（`systemInstructionRewrites`）替换 `"running inside pi..."` 等拦截特征短语。
+- **Pi 动态注入的全部实时上下文完整保留**，包括 `<tools>`、`<rules>`、`<docs>`、`<skills>`、`<cwd>`、项目 `AGENTS.md` 以及 `APPEND_SYSTEM.md`，不会因缓存静态提示词而陈旧。
+- **合成 429 兜底重试**：若极端情况下遇到未命中改写规则的变体并触发合成 429（无退避延迟），[stream.ts](pi-provider-antigravity2/stream.ts) 会立即剥离顶层 `requestType` 自动重试一次（不消耗常规重试次数）。
+
+> [!IMPORTANT]
+> 💡 **建议自定义 `~/.pi/agent/pi-provider-antigravity-prompts.json` 中的 `userModified`**
+>
+> 扩展会在首次运行会话时于 `$PI_CODING_AGENT_DIR/pi-provider-antigravity-prompts.json`（默认 `~/.pi/agent/pi-provider-antigravity-prompts.json`）生成一份**精简、可读**的提示词配置文件。
+>
+> - **每个条目都按大类平铺**，内含三个参考/生效字段：
+>   - `piOriginal`：Pi 原版内容（**仅用于查看**，仅当文件不存在或 `piVersion` 升级变化时才会检测更新）。
+>   - `extensionBuiltIn`：本扩展内置默认值（**仅用于查看**，同步自 [default-prompts.json](pi-provider-antigravity2/default-prompts.json)）。
+>   - `userModified`：**运行时唯一实际生效的部分**（初始与 `extensionBuiltIn` 一致，作为占位供你修改）。
+> - **你可以自由微调以下 `userModified` 项**：
+>   - `prompts.preamble.userModified`：自定义发给 Antigravity 模型的开场导语（例如改为更贴合你习惯的终端助手身份声明，注意避免写回 `"running inside pi"`）；后面的 `<tools>` / `<rules>` / `<cwd>` 等仍会实时拼接。
+>   - `prompts.systemInstructionRewrites.rules[*].userModified`：修改兜底正则的替换文本（`pattern` 在外层只写一份；将 `userModified` 设为 `null` 可禁用该条规则）。
+>   - `prompts.searchSystemInstruction.userModified`：自定义 `antigravity_websearch` 后台联网搜索模型（`gemini-3.5-flash-lite`）的系统提示词。
+>   - `prompts.webSearchToolDescription` / `webSearchToolSnippet` / `webSearchToolGuidelines` 的 `userModified`：自定义注册给主模型的 `antigravity_websearch` 工具描述与使用指引（修改工具元信息后重启或 `/reload` Pi 生效；其余项在下一轮对话立即生效）。
+> - **安全性与重置**：`piVersion` 未变化时跳过提取 Pi 提示词，但每次启动仍会校验文件结构完整性并保留你的所有 `userModified` 修改；若删除 `userModified` 下某个字段或删掉整份文件，下次启动会自动按 `extensionBuiltIn` 重建。
+
+---
+
+## 🛠️ 安装与使用
+
+### 📦 安装 / 加载
+
+> [!NOTE]
+> 如果你之前安装过已废弃的 `pi-provider-antigravity`，请先执行 `pi remove npm:pi-provider-antigravity` 卸载旧包再安装本扩展，因为两者共享 `antigravity` Provider ID、`/antigravity` 命令及 `~/.pi/agent/pi-provider-antigravity*.json` 配置文件路径。
+
+```bash
+# 方式 A：通过 npm 安装（推荐）
+pi install npm:pi-provider-antigravity2
+
+# 方式 B：免安装临时试用
+pi -e npm:pi-provider-antigravity2
+
+# 方式 C：从本地克隆加载或软链接
+pi -e /path/to/repo
+# 或：ln -s /path/to/repo/pi-provider-antigravity2 ~/.pi/agent/extensions/pi-provider-antigravity2
+```
+
+登录账号后选择 `antigravity` 模型即可使用：
+
+```text
+/login antigravity
+```
+
+#### 🪪 使用 Refresh Token（RT）免浏览器登录（`auth.json`）
+
+如果你已经有现成的 Google OAuth Refresh Token（例如无头服务器、容器环境或从已有凭证迁移），无需走浏览器交互登录，直接写入 `$PI_CODING_AGENT_DIR/auth.json`（默认 `~/.pi/agent/auth.json`）即可：
+
+```json
+{
+  "antigravity": {
+    "type": "oauth",
+    "refresh": "1//03_your_refresh_token_here",
+    "access": "",
+    "expires": 0
+  }
+}
+```
+
+- `type`：固定为 `"oauth"`。
+- `refresh`：填入你的 Refresh Token（`1//...`；即使不小心多粘了前导连字符 `-1//...`，扩展也会自动清理）。
+- `access` 与 `expires`：保持 `""` 和 `0` 即可。下次启动 Pi（或首次刷新模型/发起对话）时，扩展会自动用 `refresh` 换取 `access_token` 并解析 `projectId`。
+- 建议将权限收紧为仅当前用户可读：`chmod 600 ~/.pi/agent/auth.json`。
+
+### 💬 内置命令与工具
+
+- **`/antigravity usage`**：查看当前 5 小时与每周配额池进度条及重置时间
+- **`/antigravity models`**：查看推荐/可用模型、上下文窗口与剩余配额
+- **`/antigravity refresh`**：强制刷新最新模型目录
+- **`/antigravity settings`**：交互式配置界面（写入 `~/.pi/agent/pi-provider-antigravity.json`）：
+  - `Quota footer`（`"off"` / `"smart"` / `"all"`）：底部状态栏配额显示模式
+  - `Unsigned tool calls`（`"fail"` / `"skip"`）：处理跨 Provider 丢失 `thoughtSignature` 的策略
+- **`/antigravity websearch <query>`** & **`antigravity_websearch` 工具**：基于原生 HTTP Google Search Grounding 的联网检索与内联引用来源
+
+---
+
+## 🧪 开发与离线测试
+
+本项目所有源码均采用原生可擦除 TypeScript（显式 `.ts` 导入，零第三方运行时依赖），可直接在 Node v22.19+ 上运行单元测试：
+
+```bash
+npm test
+# 等价于：node --experimental-strip-types --test tests/*.test.ts
+```
+
+### 📁 目录结构
+
+- [pi-provider-antigravity2/index.ts](pi-provider-antigravity2/index.ts) — Pi 扩展入口、Provider 与命令/工具注册
+- [pi-provider-antigravity2/auth.ts](pi-provider-antigravity2/auth.ts) — OAuth PKCE 登录、Token 刷新、`loadCodeAssist` 项目解析
+- [pi-provider-antigravity2/protocol.ts](pi-provider-antigravity2/protocol.ts) — Cloud Code HTTP/SSE 客户端与结构化异常
+- [pi-provider-antigravity2/model-identity.ts](pi-provider-antigravity2/model-identity.ts) & [model-catalog.ts](pi-provider-antigravity2/model-catalog.ts) — 模型族识别、目录刷新、`xhigh` 思考配置与冷启动预引导
+- [pi-provider-antigravity2/default-prompts.json](pi-provider-antigravity2/default-prompts.json) & [prompts.ts](pi-provider-antigravity2/prompts.ts) — 外置默认提示词与 `pi-provider-antigravity-prompts.json` 生命周期管理
+- [pi-provider-antigravity2/builder.ts](pi-provider-antigravity2/builder.ts) — 出站系统提示词局部适配、Tool Schema 清洗、多轮历史与签名转换
+- [pi-provider-antigravity2/sse.ts](pi-provider-antigravity2/sse.ts) & [stream.ts](pi-provider-antigravity2/stream.ts) — SSE 增量解析、合成 429 自动退避剥离与 401 恢复
+- [pi-provider-antigravity2/config.ts](pi-provider-antigravity2/config.ts)、[settings.ts](pi-provider-antigravity2/settings.ts)、[quota-status.ts](pi-provider-antigravity2/quota-status.ts)、[search.ts](pi-provider-antigravity2/search.ts)、[commands.ts](pi-provider-antigravity2/commands.ts) — 配置持久化、配额状态栏、搜索工具与 `/antigravity` 命令路由

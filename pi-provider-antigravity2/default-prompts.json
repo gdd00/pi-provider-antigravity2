@@ -1,0 +1,29 @@
+{
+  "descriptions": {
+    "preamble": "Opening preamble of Pi's main system prompt (only this part is replaced; live <tools>/<rules>/<docs>/<skills>/<cwd> remain untouched)",
+    "systemInstructionRewrites": "Regex rewrite rules applied to outbound Antigravity systemInstruction (pattern once on the outside, replacement values inside)",
+    "searchSystemInstruction": "System instruction sent to the background search model for antigravity_websearch",
+    "webSearchToolDescription": "Tool description registered for antigravity_websearch",
+    "webSearchToolSnippet": "Single-line snippet injected into Pi's <tools> section for antigravity_websearch",
+    "webSearchToolGuidelines": "Usage guideline bullets injected into Pi's <rules> section for antigravity_websearch"
+  },
+  "defaultRewriteFlags": "gi",
+  "systemInstructionRewrites": [
+    {
+      "pattern": "\\bYou are a coding assistant running inside pi(?:,\\s*a coding agent harness)?\\b",
+      "replacement": "You are a coding assistant"
+    },
+    {
+      "pattern": "\\brunning inside pi(?:,\\s*a coding agent harness)?\\b",
+      "replacement": "running inside an interactive coding agent"
+    }
+  ],
+  "searchSystemInstruction": "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.",
+  "webSearchTool": {
+    "description": "Performs a web search for a given query. Returns a summary of relevant information along with URL citations.",
+    "promptSnippet": "Search the web using Google Search Grounding with source citations",
+    "promptGuidelines": [
+      "Use antigravity_websearch when you need real-time web search, latest documentation, or up-to-date facts with verified citations."
+    ]
+  }
+}
