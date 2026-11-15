@@ -43,6 +43,23 @@ test("adaptSystemInstructionText neutralizes Pi harness signatures while keeping
   assert.notEqual(adaptedObj, structured);
   assert.ok(structured.parts[0].text.includes("running inside pi"));
   assert.equal(adaptedObj.parts[0].text.includes("inside pi"), false);
+
+  const pi152CodemodePrompt = [
+    "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.",
+    "<tools>\n- codemode: Run JavaScript that calls other tools\n</tools>",
+    "<rules>\n- Use codemode cleanly\n</rules>",
+    "<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/pi-coding-agent/README.md\n- When asked about: extensions (docs/extensions.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>",
+    "<skills>\n- user-system-info\n</skills>",
+    "<cwd>\n/home/gdd/code/pi/proj\n</cwd>",
+  ].join("\n\n");
+
+  const adapted152 = adaptSystemInstructionText(pi152CodemodePrompt);
+  assert.equal(adapted152.includes("<docs>"), false);
+  assert.equal(adapted152.includes("codemode scripts and non-LLM"), false);
+  assert.ok(adapted152.includes("<tools>\n- codemode: Run JavaScript that calls other tools\n</tools>"));
+  assert.ok(adapted152.includes("<rules>\n- Use codemode cleanly\n</rules>"));
+  assert.ok(adapted152.includes("<skills>\n- user-system-info\n</skills>"));
+  assert.ok(adapted152.includes("<cwd>\n/home/gdd/code/pi/proj\n</cwd>"));
   assert.deepEqual(adaptedObj.parts[1], structured.parts[1]);
 });
 

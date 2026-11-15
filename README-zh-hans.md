@@ -112,7 +112,7 @@
 
 ## ✂️ 本扩展如何修改系统提示词（仅切换为 `antigravity` 时生效）
 
-为了在绕过 429 检测的同时**完整保留 Pi 的全部能力与上下文**，本扩展采用了**仅在出站请求阶段局部适配**的设计：
+为了在绕过 429 检测的同时**尽可能保留 Pi 的编程能力与上下文**，本扩展采用了**仅在出站请求阶段局部适配**的设计：
 
 ### 1. 🔒 严格隔离的作用范围
 
@@ -120,11 +120,12 @@
 - `session_start` 与 `before_agent_start` 钩子**只做读取与配置文件校验**，不修改 Pi 内存中的系统提示词。
 - **切换到 OpenAI、Anthropic 等其他任何 Provider 时，Pi 的系统提示词一字不动。**
 
-### 2. 🧩 最小化改写，完整保留实时上下文
+### 2. 🧩 最小化改写与上下文说明
 
-- **仅修改开头导语（`preamble`）**，或按配置的正则规则（`systemInstructionRewrites`）替换 `"running inside pi..."` 等拦截特征短语。
-- **Pi 动态注入的全部实时上下文完整保留**，包括 `<tools>`、`<rules>`、`<docs>`、`<skills>`、`<cwd>`、项目 `AGENTS.md` 以及 `APPEND_SYSTEM.md`，不会因缓存静态提示词而陈旧。
-- **合成 429 兜底重试**：若极端情况下遇到未命中改写规则的变体并触发合成 429（无退避延迟），[stream.ts](pi-provider-antigravity2/stream.ts) 会立即剥离顶层 `requestType` 自动重试一次（不消耗常规重试次数）。
+- **改写开场导语并剥离拦截特征**：通过 `preamble` 与 `systemInstructionRewrites` 正则规则替换 `"running inside pi..."` 等特征短语，并移除会触发 Antigravity WAF 的 Pi 内置 `<docs>` 段落。
+- **其余实时上下文完整保留**：`<tools>`、`<rules>`、`<skills>`、`<cwd>`、项目 `AGENTS.md` 以及 `APPEND_SYSTEM.md` 均完整保留，不会因缓存静态提示词而陈旧。
+- **不包含 Pi Docs（`<docs>`）**：发往 `antigravity` 的系统提示词已移除 Pi 自带文档索引（`<docs>`），因此使用 `antigravity` 时模型看不到 Pi 文档；**如果要询问一些关于 Pi 本身的问题，请切换到其他 Provider**。
+- **合成 429 兜底恢复**：若遇到未命中配置规则的未知变体并触发合成 429（无退避延迟），[stream.ts](pi-provider-antigravity2/stream.ts) 会结合 [waf-recovery.ts](pi-provider-antigravity2/waf-recovery.ts) 自动剥离 `requestType`、执行紧急清洗，并在必要时二分定位被拦截的 `systemInstruction` 行（仅缓存在当前进程内存并重发，不改写对话历史）。
 
 > [!IMPORTANT]
 > 💡 **建议自定义 `~/.pi/agent/pi-provider-antigravity-prompts.json` 中的 `userModified`**

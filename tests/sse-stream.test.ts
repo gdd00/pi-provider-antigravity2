@@ -12,11 +12,18 @@ import {
 import {
   inspectAntigravityError,
   isSyntheticAgent429,
+  isSyntheticWaf429,
   normalizeOverflowError,
   parseDurationMs,
   sleepWithAbort,
   streamAntigravity,
 } from "../pi-provider-antigravity2/stream.ts";
+import {
+  clearWafBlockedSnippets,
+  getCachedWafBlockedSnippets,
+  isolateBlockedSystemInstruction,
+  WAF_SAFE_FALLBACK_SYSTEM_PROMPT,
+} from "../pi-provider-antigravity2/waf-recovery.ts";
 
 function sseStreamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -667,4 +674,187 @@ test("sleepWithAbort aborts promptly when signal fires", async () => {
   const promise = sleepWithAbort(5000, controller.signal);
   setTimeout(() => controller.abort(new Error("cancelled")), 10);
   await assert.rejects(promise, /cancelled/);
+});
+
+test("isSyntheticWaf429 classifies headerless synthetic 429 regardless of requestType", () => {
+  const err = new AntigravityHttpError(
+    429,
+    "v1internal:streamGenerateContent?alt=sse",
+    JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED" } }),
+  );
+  assert.equal(isSyntheticWaf429(err), true);
+  assert.equal(isSyntheticAgent429(err, {}), false);
+
+  const delayed = new AntigravityHttpError(
+    429,
+    "v1internal:streamGenerateContent?alt=sse",
+    JSON.stringify({ error: { status: "RESOURCE_EXHAUSTED" } }),
+    { "retry-after": "5" },
+  );
+  assert.equal(isSyntheticWaf429(delayed), false);
+});
+
+test("isolateBlockedSystemInstruction isolates single, multiple, and seam triggers cleanly", async () => {
+  const textWithMultiple = [
+    "You are a coding assistant.",
+    "<tools>\n- read\n- SECRET_TOOL_WAF_PHRASE\n- write\n</tools>",
+    "<rules>\n- Be concise\n- SECRET_RULE_WAF_PHRASE\n</rules>",
+    "<cwd>/repo</cwd>",
+  ].join("\n\n");
+
+  const multiResult = await isolateBlockedSystemInstruction({
+    body: {
+      project: "p",
+      model: "gemini-4-hydrogen-medium",
+      request: { systemInstruction: { role: "user", parts: [{ text: textWithMultiple }] } },
+    },
+    runProbe: async (probeBody) => {
+      const txt = probeBody.request?.systemInstruction?.parts?.[0]?.text ?? "";
+      return txt.includes("SECRET_TOOL_WAF_PHRASE") || txt.includes("SECRET_RULE_WAF_PHRASE")
+        ? { kind: "blocked" }
+        : { kind: "clean" };
+    },
+  });
+  assert.equal(multiResult.status, "recovered");
+  if (multiResult.status === "recovered") {
+    assert.deepEqual(multiResult.blockedSnippets.sort(), [
+      "- SECRET_RULE_WAF_PHRASE",
+      "- SECRET_TOOL_WAF_PHRASE",
+    ]);
+    assert.ok(multiResult.sanitizedText.includes("<tools>\n- read\n- write\n</tools>"));
+    assert.ok(multiResult.sanitizedText.includes("<rules>\n- Be concise\n</rules>"));
+    assert.ok(multiResult.sanitizedText.includes("<cwd>/repo</cwd>"));
+  }
+
+  // Cross-line seam trigger (only triggers when lineA + "\n" + lineB appear together).
+  const seamText = "You are a coding assistant.\n\n<rules>\npart one\npart two\n</rules>";
+  const seamResult = await isolateBlockedSystemInstruction({
+    body: {
+      project: "p",
+      model: "gemini-4-hydrogen-medium",
+      request: { systemInstruction: { role: "user", parts: [{ text: seamText }] } },
+    },
+    runProbe: async (probeBody) => {
+      const txt = probeBody.request?.systemInstruction?.parts?.[0]?.text ?? "";
+      return txt.includes("part one\npart two") ? { kind: "blocked" } : { kind: "clean" };
+    },
+  });
+  assert.equal(seamResult.status, "recovered");
+  if (seamResult.status === "recovered") {
+    assert.equal(seamResult.sanitizedText.includes("part one\npart two"), false);
+  }
+
+  // Global 429 (baseline also blocked) stops in 2 probes without bisecting.
+  let globalProbeCalls = 0;
+  const globalResult = await isolateBlockedSystemInstruction({
+    body: {
+      project: "p",
+      model: "gemini-4-hydrogen-medium",
+      request: { systemInstruction: { role: "user", parts: [{ text: "Line A\n\nLine B" }] } },
+    },
+    runProbe: async () => {
+      globalProbeCalls += 1;
+      return { kind: "blocked" };
+    },
+  });
+  assert.equal(globalResult.status, "global-429");
+  assert.equal(globalProbeCalls, 2);
+});
+
+test("streamAntigravity self-heals unknown WAF triggers in systemInstruction and caches remediation for subsequent turns", async () => {
+  clearWafBlockedSnippets();
+  const seenRequests: any[] = [];
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (msg: unknown) => {
+    warnings.push(String(msg));
+  };
+
+  try {
+    const client: AntigravityClient = {
+      async fetchAvailableModels() {
+        return {};
+      },
+      async postJson() {
+        throw new Error("not used");
+      },
+      async streamGenerateContent(opts) {
+        seenRequests.push(structuredClone(opts.body));
+        const sys = (opts.body?.request?.systemInstruction?.parts ?? [])
+          .map((p: any) => p?.text ?? "")
+          .join("\n");
+        if (sys.includes("BRAND_NEW_GOOGLE_WAF_TRIGGER")) {
+          throw new AntigravityHttpError(
+            429,
+            "v1internal:streamGenerateContent?alt=sse",
+            JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED" } }),
+          );
+        }
+        return {
+          response: new Response(null, { status: 200 }),
+          stream: sseStreamFromChunks([
+            'data: {"response":{"responseId":"r-healed","candidates":[{"content":{"parts":[{"text":"Healed OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":5,"totalTokenCount":55}}}\n\n',
+          ]),
+        };
+      },
+      async retrieveQuotaSummary() {
+        return {};
+      },
+    };
+
+    const systemPrompt = [
+      "You are a coding assistant.",
+      "<tools>\n- read\n- write\n</tools>",
+      "<rules>\n- Keep edits minimal\n- BRAND_NEW_GOOGLE_WAF_TRIGGER\n- Report accurately\n</rules>",
+      "<cwd>/tmp/work</cwd>",
+    ].join("\n\n");
+
+    const catalog = makeCatalogWithHydrogen();
+    const model = makeModel();
+
+    // Turn 1: discovers and removes ONLY "- BRAND_NEW_GOOGLE_WAF_TRIGGER", succeeds, and caches it.
+    const turn1 = await streamAntigravity(
+      model,
+      { systemPrompt, messages: [{ role: "user", content: "hi" }] },
+      { apiKey: VALID_API_KEY },
+      catalog,
+      client,
+      {},
+      { sleep: async () => {} },
+    ).result();
+
+    assert.equal(turn1.stopReason, "stop");
+    assert.deepEqual(turn1.content, [{ type: "text", text: "Healed OK" }]);
+    assert.deepEqual(getCachedWafBlockedSnippets(), ["- BRAND_NEW_GOOGLE_WAF_TRIGGER"]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /BRAND_NEW_GOOGLE_WAF_TRIGGER/);
+
+    const finalTurn1Body = seenRequests[seenRequests.length - 1];
+    assert.equal("requestType" in finalTurn1Body, false);
+    const finalTurn1Sys = finalTurn1Body.request.systemInstruction.parts[0].text;
+    assert.equal(finalTurn1Sys.includes("BRAND_NEW_GOOGLE_WAF_TRIGGER"), false);
+    assert.ok(finalTurn1Sys.includes("<tools>\n- read\n- write\n</tools>"));
+    assert.ok(finalTurn1Sys.includes("<rules>\n- Keep edits minimal\n- Report accurately\n</rules>"));
+    assert.ok(finalTurn1Sys.includes("<cwd>/tmp/work</cwd>"));
+    assert.notEqual(finalTurn1Sys, WAF_SAFE_FALLBACK_SYSTEM_PROMPT);
+
+    // Turn 2: applies cached snippet remediation immediately in 1 request with 0 retries/probes.
+    const countBeforeTurn2 = seenRequests.length;
+    const turn2 = await streamAntigravity(
+      model,
+      { systemPrompt, messages: [{ role: "user", content: "follow-up" }] },
+      { apiKey: VALID_API_KEY },
+      catalog,
+      client,
+      {},
+      { sleep: async () => {} },
+    ).result();
+
+    assert.equal(turn2.stopReason, "stop");
+    assert.equal(seenRequests.length - countBeforeTurn2, 1);
+    assert.equal(seenRequests[seenRequests.length - 1].requestType, "agent");
+  } finally {
+    console.warn = origWarn;
+    clearWafBlockedSnippets();
+  }
 });

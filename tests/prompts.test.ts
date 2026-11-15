@@ -73,8 +73,12 @@ test("syncPromptsFile puts pattern outside and keeps flat piOriginal/extensionBu
     assert.equal(disk1.prompts.preamble.piOriginal.includes("<tools>"), false);
 
     // systemInstructionRewrites has pattern once per rule with piOriginal/extensionBuiltIn/userModified inside.
+    const builtInBundle = loadDefaultPromptsBundle();
     assert.equal(disk1.prompts.systemInstructionRewrites.defaultFlags, "gi");
-    assert.equal(disk1.prompts.systemInstructionRewrites.rules.length, 2);
+    assert.equal(
+      disk1.prompts.systemInstructionRewrites.rules.length,
+      builtInBundle.systemInstructionRewrites.length,
+    );
     assert.equal(disk1.prompts.systemInstructionRewrites.rules[0].piOriginal, null);
     assert.equal(
       disk1.prompts.systemInstructionRewrites.rules[0].extensionBuiltIn,
@@ -449,6 +453,107 @@ test("initializePromptSync extracts from Pi only when missing, skips extraction 
       "You are a coding assistant running inside pi. v1.5.3.",
     );
     assert.equal(afterUpgrade.prompts.preamble.userModified, "You are a coding assistant. v1.5.3.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("built-in rewrites strip Pi <docs>, neutralize historical preambles, and merge new built-in rules into existing files", () => {
+  const dir = makeTempDir();
+  const file = path.join(dir, PROVIDER_PROMPTS_FILE);
+  try {
+    const legacyPiDocs = [
+      "<docs>",
+      "Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):",
+      "- Main documentation: /opt/pi-coding-agent/README.md",
+      "- When asked about: extensions (docs/extensions.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)",
+      "</docs>",
+    ].join("\n");
+
+    const fullPrompt = [
+      "You are an expert coding assistant operating inside pi, a coding agent harness. Help users.",
+      "<tools>\n- codemode\n</tools>",
+      legacyPiDocs,
+      "<cwd>/tmp/proj</cwd>",
+    ].join("\n\n");
+
+    const builtInConfig = buildInitialPromptsConfig();
+    const outbound = resolveOutboundSystemPrompt(fullPrompt, builtInConfig);
+    assert.equal(
+      outbound,
+      "You are an expert coding assistant. Help users.\n\n<tools>\n- codemode\n</tools>\n\n<cwd>/tmp/proj</cwd>",
+    );
+    assert.equal(outbound.includes("<docs>"), false);
+    assert.equal(outbound.toLowerCase().includes("codemode scripts and non-llm"), false);
+
+    // Works cleanly when <docs> is at the very start or very end of the prompt too.
+    assert.equal(
+      resolveOutboundSystemPrompt(`${legacyPiDocs}\n\n<cwd>/a</cwd>`, builtInConfig),
+      "<cwd>/a</cwd>",
+    );
+    assert.equal(
+      resolveOutboundSystemPrompt(`<rules>\n- be concise\n</rules>\n\n${legacyPiDocs}`, builtInConfig),
+      "<rules>\n- be concise\n</rules>",
+    );
+
+    // Custom non-Pi <docs> section stays untouched.
+    const customDocs = "<docs>\nProject API documentation stays here.\n</docs>";
+    assert.equal(resolveOutboundSystemPrompt(customDocs, builtInConfig), customDocs);
+
+    // Mid-conversation section updates for Pi's docs are stripped while sibling updates remain.
+    const sectionUpdate = [
+      'Updated system prompt section "tools":\n\n- codemode',
+      'Updated system prompt section "docs":\n\nPi documentation (read only when the user asks about the harness itself)\n- docs/codemode.md',
+      'Removed system prompt section "docs".',
+      'Updated system prompt section "cwd":\n\n/tmp/next',
+    ].join("\n\n");
+    assert.equal(
+      resolveOutboundSystemPrompt(sectionUpdate, builtInConfig),
+      'Updated system prompt section "tools":\n\n- codemode\n\nUpdated system prompt section "cwd":\n\n/tmp/next',
+    );
+
+    // Existing prompts.json on same piVersion ("1.5.2") with only the old 2 built-in rules + custom rule
+    // merges in new built-in rules without overwriting user customizations or null opt-outs.
+    const initial = buildInitialPromptsConfig("You are a coding assistant running inside pi.", "2026-01-01T00:00:00.000Z", "1.5.2");
+    const firstBuiltInRule = initial.prompts.systemInstructionRewrites.rules[0];
+    const thirdBuiltInRule = initial.prompts.systemInstructionRewrites.rules[2];
+    initial.prompts.preamble.userModified = "Custom assistant persona.";
+    initial.prompts.systemInstructionRewrites.rules = [
+      { ...firstBuiltInRule, userModified: null },
+      thirdBuiltInRule,
+      {
+        pattern: "custom-secret",
+        piOriginal: null,
+        extensionBuiltIn: null,
+        userModified: "custom-redacted",
+      },
+    ];
+    fs.writeFileSync(file, JSON.stringify(initial, null, 2), "utf-8");
+
+    const repaired = syncPromptsFile({ file, piVersion: "1.5.2" });
+    assert.equal(repaired.written, true);
+    assert.equal(repaired.reason, "file-repaired");
+
+    const reloaded = loadPromptsFile(file)!;
+    assert.equal(reloaded.prompts.preamble.userModified, "Custom assistant persona.");
+    assert.equal(
+      reloaded.prompts.systemInstructionRewrites.rules.find(
+        (r) => r.pattern === firstBuiltInRule.pattern,
+      )?.userModified,
+      null,
+    );
+    assert.equal(
+      reloaded.prompts.systemInstructionRewrites.rules.find((r) => r.pattern === "custom-secret")
+        ?.userModified,
+      "custom-redacted",
+    );
+    assert.equal(
+      reloaded.prompts.systemInstructionRewrites.rules.length,
+      loadDefaultPromptsBundle().systemInstructionRewrites.length + 1,
+    );
+    // Applying the upgraded file drops Pi's <docs> block cleanly.
+    const upgradedOutbound = resolveOutboundSystemPrompt(`${legacyPiDocs}\n\n<cwd>/tmp/p</cwd>`, file);
+    assert.equal(upgradedOutbound, "<cwd>/tmp/p</cwd>");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

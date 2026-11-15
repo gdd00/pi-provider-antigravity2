@@ -112,7 +112,7 @@ Wire captures, field-ablation tests, and character-level bisection confirmed tha
 
 ## ✂️ How This Extension Adapts System Prompts (Only When Switched to `antigravity`)
 
-To bypass the synthetic 429 check **without sacrificing any of Pi's capabilities or context**, prompt adaptation is strictly scoped to outbound Antigravity requests:
+To bypass the synthetic 429 check **while preserving Pi's coding capabilities and context as much as possible**, prompt adaptation is strictly scoped to outbound Antigravity requests:
 
 ### 1. 🔒 Strictly Isolated Scope
 
@@ -120,11 +120,12 @@ To bypass the synthetic 429 check **without sacrificing any of Pi's capabilities
 - The `session_start` and `before_agent_start` hooks are **read/validate only** — they never mutate Pi's in-memory system prompt.
 - **When using OpenAI, Anthropic, or any other provider, Pi's system prompt is left completely untouched.**
 
-### 2. 🧩 Minimal Adaptation While Preserving Live Context
+### 2. 🧩 Minimal Adaptation & Context Caveats
 
-- **Only rewrites the opening `preamble`** (or configured regex rules in `systemInstructionRewrites`) to neutralize trigger phrases such as `"running inside pi..."`.
-- **All live Pi context remains 100% intact**, including `<tools>`, `<rules>`, `<docs>`, `<skills>`, `<cwd>`, project `AGENTS.md`, and `APPEND_SYSTEM.md` — nothing goes stale from cached static prompts.
-- **Synthetic 429 Fallback Retry**: If an unmatched prompt variant ever hits a synthetic 429 (no backoff metadata), [stream.ts](pi-provider-antigravity2/stream.ts) automatically strips the top-level `requestType` and retries once immediately without consuming normal retry budget.
+- **Rewrites the opening `preamble` and strips WAF triggers**: Neutralizes phrases like `"running inside pi..."` and removes Pi's built-in `<docs>` boilerplate via `systemInstructionRewrites` so Antigravity's proxy WAF accepts the prompt.
+- **All other live Pi context remains intact**: `<tools>`, `<rules>`, `<skills>`, `<cwd>`, project `AGENTS.md`, and `APPEND_SYSTEM.md` are still injected live on every turn — nothing goes stale from cached static prompts.
+- **No Pi Docs (`<docs>`) on `antigravity`**: Because Pi's built-in `<docs>` section is stripped from outbound `antigravity` system instructions, `antigravity` models cannot see Pi's self-documentation. **If you need to ask questions about Pi itself (usage, configuration, extensions, etc.), switch to another provider.**
+- **Synthetic 429 Auto-Recovery**: If an unmatched prompt variant still triggers a synthetic 429 (no backoff metadata), [stream.ts](pi-provider-antigravity2/stream.ts) and [waf-recovery.ts](pi-provider-antigravity2/waf-recovery.ts) strip top-level `requestType`, apply emergency sanitization, and if needed bisect the blocked `systemInstruction` line(s) (cached in-memory for the current process without altering conversation history).
 
 > [!IMPORTANT]
 > 💡 **Customize `userModified` in `~/.pi/agent/pi-provider-antigravity-prompts.json`**

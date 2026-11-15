@@ -737,8 +737,10 @@ function buildUpdatedCollection(
   let nextRewriteEntries: RewriteRuleEntry[];
   if (Array.isArray(rawRewrites?.rules)) {
     const synced: RewriteRuleEntry[] = [];
+    const seenPatterns = new Set<string>();
     for (const rawRule of rawRewrites.rules) {
       if (!isPlainObject(rawRule) || typeof rawRule.pattern !== "string") continue;
+      seenPatterns.add(rawRule.pattern);
       const match = builtInByPattern.get(rawRule.pattern);
       const nextExt = match ? match.replacement : null;
       const prevExt =
@@ -750,13 +752,27 @@ function buildUpdatedCollection(
       const prevUser = hasUserVal ? (rawRule.userModified as string | null) : undefined;
       const customized =
         prevUser !== undefined && (prevExt === undefined || prevUser !== prevExt);
+      const resolvedFlags =
+        typeof rawRule.flags === "string" ? rawRule.flags : match?.flags;
 
       synced.push({
         pattern: rawRule.pattern,
-        ...(typeof rawRule.flags === "string" ? { flags: rawRule.flags } : {}),
+        ...(typeof resolvedFlags === "string" ? { flags: resolvedFlags } : {}),
         piOriginal: null,
         extensionBuiltIn: nextExt,
         userModified: customized ? prevUser : nextExt,
+      });
+    }
+    // Append newly added built-in rewrite rules so existing prompt files automatically receive
+    // newly discovered upstream WAF protections without overwriting user edits.
+    for (const builtInRule of builtIn.systemInstructionRewrites) {
+      if (seenPatterns.has(builtInRule.pattern)) continue;
+      synced.push({
+        pattern: builtInRule.pattern,
+        ...(builtInRule.flags ? { flags: builtInRule.flags } : {}),
+        piOriginal: null,
+        extensionBuiltIn: builtInRule.replacement,
+        userModified: builtInRule.replacement,
       });
     }
     nextRewriteEntries = synced;

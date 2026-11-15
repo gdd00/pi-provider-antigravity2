@@ -31,6 +31,18 @@ import {
   type StreamDeliveryEvent,
 } from "./sse.ts";
 import { resolveUnsignedToolCalls, type UnsignedToolCallsMode } from "./settings.ts";
+import {
+  WAF_SAFE_FALLBACK_SYSTEM_PROMPT,
+  applyEmergencyPiSanitization,
+  getCachedWafBlockedSnippets,
+  isolateBlockedSystemInstruction,
+  readSystemInstructionText,
+  recordWafBlockedSnippet,
+  removeBlockedSnippetsFromText,
+  warnWafAutoRemediationOnce,
+  withSystemInstructionText,
+  type ProbeOutcome,
+} from "./waf-recovery.ts";
 
 export interface StreamPiHelpers {
   createStream?: () => AssistantMessageEventStream;
@@ -54,6 +66,7 @@ export interface StreamRetryPolicy {
   maxRetries?: number;
   baseDelayMs?: number;
   maxRetryDelayMs?: number;
+  maxWafProbes?: number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
   fetchImpl?: typeof fetch;
@@ -353,6 +366,21 @@ export function inspectAntigravityError(
 }
 
 /**
+ * Returns true if the error is an instant synthetic `429 RESOURCE_EXHAUSTED`
+ * (lacking any Retry-After header or JSON reset/retry delay), which Antigravity's
+ * proxy WAF returns for blocked `systemInstruction` or `requestType` payloads.
+ */
+export function isSyntheticWaf429(err: unknown, nowFn: () => number = Date.now): boolean {
+  const info = inspectAntigravityError(err, nowFn);
+  return (
+    info.status === 429 &&
+    info.isResourceExhausted &&
+    !info.hasRetryHeader &&
+    !info.hasPayloadDelay
+  );
+}
+
+/**
  * Returns true if the error is an instant synthetic `429 RESOURCE_EXHAUSTED` triggered
  * by `requestType === "agent"` (lacking any Retry-After header or JSON reset/retry delay).
  */
@@ -362,13 +390,44 @@ export function isSyntheticAgent429(
   nowFn: () => number = Date.now,
 ): boolean {
   if (requestBody?.requestType !== "agent") return false;
-  const info = inspectAntigravityError(err, nowFn);
-  return (
-    info.status === 429 &&
-    info.isResourceExhausted &&
-    !info.hasRetryHeader &&
-    !info.hasPayloadDelay
-  );
+  return isSyntheticWaf429(err, nowFn);
+}
+
+async function closeStreamResultQuietly(res: {
+  response?: Response;
+  stream?: AsyncIterable<unknown>;
+}): Promise<void> {
+  const iter = res.stream?.[Symbol.asyncIterator]?.();
+  await iter?.return?.().catch(() => {});
+  await res.response?.body?.cancel?.().catch(() => {});
+}
+
+function applyOutboundWafTransforms(
+  body: Record<string, any>,
+  options: { emergencySanitizeSystem: boolean; isolatedSanitizedSystemText?: string },
+): Record<string, any> {
+  const rawSystemText = readSystemInstructionText(body);
+  if (!rawSystemText) return body;
+
+  let nextSystemText = rawSystemText;
+  const cachedSnippets = getCachedWafBlockedSnippets();
+  if (cachedSnippets.length > 0) {
+    const afterCache = removeBlockedSnippetsFromText(nextSystemText, cachedSnippets);
+    if (afterCache !== nextSystemText) {
+      nextSystemText = afterCache || WAF_SAFE_FALLBACK_SYSTEM_PROMPT;
+    }
+  }
+
+  if (options.emergencySanitizeSystem) {
+    nextSystemText = applyEmergencyPiSanitization(nextSystemText);
+  }
+
+  if (options.isolatedSanitizedSystemText !== undefined) {
+    nextSystemText = options.isolatedSanitizedSystemText;
+  }
+
+  if (nextSystemText === rawSystemText) return body;
+  return withSystemInstructionText(body, nextSystemText);
 }
 
 /**
@@ -598,8 +657,51 @@ export function streamAntigravity(
       let activeSource: CredentialSource = options as CredentialSource;
       let stripRequestType = false;
       let strippedFallbackUsed = false;
+      let emergencySanitizeSystem = false;
+      let wafIsolationUsed = false;
+      let isolatedSanitizedSystemText: string | undefined;
       let authRefreshUsed = false;
       let transientAttempts = 0;
+
+      const executeWafProbe = async (
+        probeBody: Record<string, any>,
+        projectId: string,
+      ): Promise<ProbeOutcome> => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const probeRes = await client.streamGenerateContent({
+              source: activeSource,
+              endpoint,
+              headers: mergedHeaders,
+              body: probeBody,
+              signal: options?.signal,
+            });
+            await closeStreamResultQuietly(probeRes);
+            return { kind: "clean" };
+          } catch (probeErr) {
+            if (options?.signal?.aborted) throw probeErr;
+            if (attempt === 0 && !authRefreshUsed) {
+              const refreshed = await tryRecoverUnauthorized(
+                probeErr,
+                model,
+                options,
+                retryPolicy.fetchImpl,
+                projectId,
+              );
+              if (refreshed) {
+                activeSource = refreshed;
+                authRefreshUsed = true;
+                continue;
+              }
+            }
+            if (isSyntheticWaf429(probeErr, nowFn)) {
+              return { kind: "blocked" };
+            }
+            return { kind: "inconclusive", error: probeErr };
+          }
+        }
+        return { kind: "inconclusive", error: new Error("WAF probe exhausted retries") };
+      };
 
       while (true) {
         if (options?.signal?.aborted) {
@@ -637,6 +739,11 @@ export function streamAntigravity(
           }
         }
 
+        requestBody = applyOutboundWafTransforms(requestBody, {
+          emergencySanitizeSystem,
+          isolatedSanitizedSystemText,
+        });
+
         let streamResult;
         try {
           streamResult = await client.streamGenerateContent({
@@ -664,10 +771,43 @@ export function streamAntigravity(
             }
           }
 
-          if (!strippedFallbackUsed && isSyntheticAgent429(err, requestBody, nowFn)) {
+          const syntheticWaf429 = isSyntheticWaf429(err, nowFn);
+          if (!strippedFallbackUsed && syntheticWaf429) {
+            const hadRequestType = requestBody?.requestType === "agent";
+            const currentSys = readSystemInstructionText(requestBody);
+            const sanitizedSys = currentSys ? applyEmergencyPiSanitization(currentSys) : currentSys;
             stripRequestType = true;
+            emergencySanitizeSystem = true;
             strippedFallbackUsed = true;
-            continue;
+            if (hadRequestType || sanitizedSys !== currentSys) {
+              continue;
+            }
+          }
+
+          if (strippedFallbackUsed && !wafIsolationUsed && syntheticWaf429) {
+            wafIsolationUsed = true;
+            const currentSys = readSystemInstructionText(requestBody);
+            const maxWafProbes = retryPolicy.maxWafProbes;
+            if (
+              currentSys.trim() &&
+              currentSys.trim() !== WAF_SAFE_FALLBACK_SYSTEM_PROMPT &&
+              (maxWafProbes === undefined || maxWafProbes > 0)
+            ) {
+              const recovery = await isolateBlockedSystemInstruction({
+                body: requestBody,
+                maxProbes: maxWafProbes,
+                runProbe: (probeBody) => executeWafProbe(probeBody, creds.projectId),
+              });
+              if (recovery.status === "recovered") {
+                for (const snippet of recovery.blockedSnippets) {
+                  recordWafBlockedSnippet(snippet);
+                }
+                warnWafAutoRemediationOnce(recovery.blockedSnippets);
+                isolatedSanitizedSystemText = recovery.sanitizedText;
+                stripRequestType = true;
+                continue;
+              }
+            }
           }
 
           const info = inspectAntigravityError(err, nowFn);

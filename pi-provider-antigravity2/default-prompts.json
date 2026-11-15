@@ -1,6 +1,6 @@
 {
   "descriptions": {
-    "preamble": "Opening preamble of Pi's main system prompt (only this part is replaced; live <tools>/<rules>/<docs>/<skills>/<cwd> remain untouched)",
+    "preamble": "Opening preamble of Pi's main system prompt (only this part is replaced; live <tools>/<rules>/<skills>/<cwd> remain untouched while Pi's built-in <docs> boilerplate is stripped via systemInstructionRewrites)",
     "systemInstructionRewrites": "Regex rewrite rules applied to outbound Antigravity systemInstruction (pattern once on the outside, replacement values inside)",
     "searchSystemInstruction": "System instruction sent to the background search model for antigravity_websearch",
     "webSearchToolDescription": "Tool description registered for antigravity_websearch",
@@ -14,8 +14,29 @@
       "replacement": "You are a coding assistant"
     },
     {
+      "pattern": "\\bYou are an expert coding assistant operating inside pi(?:,\\s*a coding agent harness)?\\b",
+      "replacement": "You are an expert coding assistant"
+    },
+    {
       "pattern": "\\brunning inside pi(?:,\\s*a coding agent harness)?\\b",
       "replacement": "running inside an interactive coding agent"
+    },
+    {
+      "pattern": "\\boperating inside pi(?:,\\s*a coding agent harness)?\\b",
+      "replacement": "operating inside an interactive coding agent"
+    },
+    {
+      "pattern": "(?:^\\n*<docs>\\nPi documentation \\(read only when the user asks about (?:the harness|pi) itself[\\s\\S]*?</docs>\\n*|\\n{2,}<docs>\\nPi documentation \\(read only when the user asks about (?:the harness|pi) itself[\\s\\S]*?</docs>(?=\\n{2,}|\\s*$))",
+      "replacement": ""
+    },
+    {
+      "pattern": "(?:^\\n*(?:Updated|Removed) system prompt section \"docs\"(?::\\n\\nPi documentation \\(read only when the user asks about (?:the harness|pi) itself[\\s\\S]*?(?=\\n{2,}(?:Updated|Removed) system prompt section |\\s*$)|\\.)\\n*|\\n{2,}(?:Updated|Removed) system prompt section \"docs\"(?::\\n\\nPi documentation \\(read only when the user asks about (?:the harness|pi) itself[\\s\\S]*?(?=\\n{2,}(?:Updated|Removed) system prompt section |\\s*$)|\\.)(?=\\n{2,}|\\s*$))",
+      "flags": "gi",
+      "replacement": ""
+    },
+    {
+      "pattern": "\\bcodemode scripts and non-LLM models such as classifiers and image models(?:\\s*\\(docs/codemode\\.md\\))?",
+      "replacement": "codemode scripts and helper models"
     }
   ],
   "searchSystemInstruction": "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.",
