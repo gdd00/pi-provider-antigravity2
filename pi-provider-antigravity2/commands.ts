@@ -148,7 +148,8 @@ const SUBCOMMANDS: readonly SubcommandDef[] = Object.freeze([
   {
     name: "websearch",
     description: "Search the web using Google Search Grounding",
-    run: ({ ctx, subArgs, client }) => executeWebSearchCommand(ctx, subArgs, client),
+    run: ({ ctx, subArgs, client, catalog }) =>
+      executeWebSearchCommand(ctx, subArgs, client, catalog),
   },
   {
     name: "login",

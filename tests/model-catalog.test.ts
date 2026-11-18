@@ -18,6 +18,7 @@ import {
  * Representative snapshot matching live v1internal:fetchAvailableModels fields observed in catalog_live.json.
  */
 const LIVE_CATALOG_FIXTURE = {
+  webSearchModelIds: ["gemini-search-primary", "gemini-search-secondary"],
   models: {
     "gemini-4-hydrogen-low": {
       displayName: "Gemini 4 Hydrogen (Low)",
@@ -283,6 +284,12 @@ test("catalog persistence round-trips numeric xhigh thinkingLevel and handles of
   });
   assert.ok(models.some((m) => m.id === "gemini-4-hydrogen"));
   assert.equal(persistedWrites.length, 1);
+  assert.equal(catalog.getWebSearchModelId(), "gemini-search-primary");
+  assert.deepEqual(
+    persistedWrites[0][PRIVATE_SNAPSHOT_KEY].webSearchModelIds,
+    LIVE_CATALOG_FIXTURE.webSearchModelIds,
+  );
+  assert.ok(!models.some((m) => m.id === "gemini-search-primary"));
 
   const restoredCatalog = createModelCatalog();
   const offlineModels = await restoredCatalog.refresh({
@@ -294,12 +301,27 @@ test("catalog persistence round-trips numeric xhigh thinkingLevel and handles of
     },
   });
   assert.equal(offlineModels.length, models.length);
+  assert.equal(restoredCatalog.getWebSearchModelId(), "gemini-search-primary");
+  restoredCatalog.generation().snapshot.webSearchModelIds?.reverse();
+  assert.equal(restoredCatalog.getWebSearchModelId(), "gemini-search-primary");
   const plan = resolveModelPlan(
     "gemini-4-hydrogen",
     "xhigh",
     restoredCatalog.generation().snapshot,
   );
   assert.deepEqual(plan.thinkingConfig, { includeThoughts: true, thinkingLevel: 100 });
+});
+
+test("catalog ignores invalid search IDs and accepts snapshots from before search discovery", () => {
+  const catalog = createModelCatalog();
+  catalog.restore({ modelEnums: {}, runtimeIds: ["chat-model"], thinking: {} });
+  assert.equal(catalog.getWebSearchModelId(), undefined);
+  catalog.record({
+    webSearchModelIds: [null, "", "  gemini-search-primary  ", "gemini-search-secondary", "gemini-search-primary"],
+  });
+  assert.deepEqual(catalog.toPersisted()?.webSearchModelIds, LIVE_CATALOG_FIXTURE.webSearchModelIds);
+  catalog.record({ webSearchModelIds: "invalid-server-data" });
+  assert.equal(catalog.getWebSearchModelId(), undefined);
 });
 
 test("bootstrapCatalogFromDiskOrAuth boots cold from auth.json without mutating disk and skips network when models-store.json exists", async () => {
@@ -390,6 +412,7 @@ test("bootstrapCatalogFromDiskOrAuth boots cold from auth.json without mutating 
     });
     assert.equal(warmStart.fromStore, true);
     assert.equal(warmStart.models.length, bootstrapped.models.length);
+    assert.equal(warmStart.catalog.getWebSearchModelId(), "gemini-search-primary");
     assert.deepEqual(
       warmStart.catalog.resolvePlan("gemini-4-hydrogen", "xhigh").thinkingConfig,
       { includeThoughts: true, thinkingLevel: 100 },

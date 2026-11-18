@@ -7,6 +7,7 @@ import {
 } from "./auth.ts";
 import { notifyCommandOutput } from "./config.ts";
 import { ANTIGRAVITY_USER_AGENT_TAG } from "./constants.ts";
+import type { ModelCatalog } from "./model-catalog.ts";
 import {
   resolveSearchSystemInstruction,
   resolveWebSearchToolPrompts,
@@ -15,22 +16,27 @@ import {
 import { type AntigravityClient, defaultAntigravityClient } from "./protocol.ts";
 
 export const WEB_SEARCH_TOOL_NAME = "antigravity_websearch";
+// Compatibility fallback for catalogs from before webSearchModelIds was available.
 export const SEARCH_MODEL = "gemini-3.5-flash-lite";
 
-export interface WebSearchOptions {
-  query: string;
-  domain?: string;
-  signal?: AbortSignal;
+interface SearchConfig {
+  catalog?: Pick<ModelCatalog, "getWebSearchModelId">;
   promptsConfig?: PromptsFileConfig;
   promptsFile?: string;
 }
 
+export interface WebSearchOptions extends SearchConfig {
+  query: string;
+  domain?: string;
+  signal?: AbortSignal;
+}
+
 interface GroundingChunk {
-  web?: { uri: string; title: string };
+  web?: { uri?: string; title?: string };
 }
 
 interface GroundingSupport {
-  segment?: { startIndex?: number; endIndex?: number; text?: string };
+  segment?: { partIndex?: number; endIndex?: number };
   groundingChunkIndices?: number[];
 }
 
@@ -40,8 +46,13 @@ interface GroundingMetadata {
   groundingSupports?: GroundingSupport[];
 }
 
+interface SearchPart {
+  text?: string;
+  thought?: boolean;
+}
+
 interface SearchCandidate {
-  content?: { role: string; parts?: Array<{ text?: string }> };
+  content?: { role?: string; parts?: SearchPart[] };
   groundingMetadata?: GroundingMetadata;
 }
 
@@ -65,46 +76,78 @@ export interface SearchResult {
   completedAt: string;
 }
 
+function insertPartCitations(text: string, citations?: ReadonlyMap<number, Set<number>>): string {
+  if (!citations?.size) return text;
+  let byteOffset = 0;
+  let stringOffset = 0;
+  let lastCut = 0;
+  let annotated = "";
+  // Check only actual code-point boundaries. Out-of-range or mid-code-point offsets are ignored.
+  for (const codePoint of text) {
+    byteOffset += Buffer.byteLength(codePoint);
+    stringOffset += codePoint.length;
+    const indices = citations.get(byteOffset);
+    if (!indices) continue;
+    const markers = [...indices].map((index) => `[${index}]`).join("");
+    annotated += text.slice(lastCut, stringOffset) + markers;
+    lastCut = stringOffset;
+  }
+  return annotated + text.slice(lastCut);
+}
+
 /**
- * Formats search response text with inline numeric citations and a markdown Sources section.
+ * Builds inline citations from UTF-8 byte offsets within the original response parts.
  */
 export function formatSearchResults(
-  rawText: string,
+  response: string | readonly SearchPart[],
   metadata: GroundingMetadata | undefined,
   query: string,
   createdAt: string,
   completedAt: string,
 ): SearchResult {
-  const sources: SearchSource[] = (metadata?.groundingChunks || [])
-    .map((chunk, i) => ({
-      index: i + 1,
-      title: chunk.web?.title || "Web Source",
-      url: chunk.web?.uri || "",
-    }))
-    .filter((s) => Boolean(s.url));
+  const parts = typeof response === "string" ? [{ text: response }] : response;
+  const chunks = Array.isArray(metadata?.groundingChunks) ? metadata.groundingChunks : [];
+  const sources = chunks.flatMap((chunk, i): SearchSource[] => {
+    const web = chunk?.web;
+    const url = typeof web?.uri === "string" ? web.uri.trim() : "";
+    if (!/^https?:\/\/[^\s<>]+$/i.test(url) || !URL.canParse(url)) return [];
+    const title = typeof web?.title === "string" ? web.title.replace(/\s+/g, " ").trim() : "";
+    return [{ index: i + 1, title: title || "Web Source", url }];
+  });
+  const validIndices = new Set(sources.map(({ index }) => index));
 
-  const queries = metadata?.webSearchQueries || [];
-  let annotatedText = rawText;
-
-  const supports = (metadata?.groundingSupports || [])
-    .filter(
-      (s): s is GroundingSupport & { segment: { endIndex: number } } =>
-        typeof s.segment?.endIndex === "number" &&
-        Array.isArray(s.groundingChunkIndices) &&
-        s.groundingChunkIndices.length > 0,
-    )
-    .slice()
-    .sort((a, b) => (b.segment.endIndex ?? 0) - (a.segment.endIndex ?? 0));
-
-  for (const sup of supports) {
-    const end = sup.segment.endIndex;
-    if (end >= 0 && end <= annotatedText.length) {
-      const citations = sup.groundingChunkIndices!.map((idx) => `[${idx + 1}]`).join("");
-      annotatedText = annotatedText.slice(0, end) + citations + annotatedText.slice(end);
+  const citationsByPart = new Map<number, Map<number, Set<number>>>();
+  const supports = Array.isArray(metadata?.groundingSupports) ? metadata.groundingSupports : [];
+  for (const support of supports) {
+    const partIndex = support?.segment?.partIndex ?? 0;
+    const endIndex = support?.segment?.endIndex;
+    if (!Number.isInteger(partIndex) || partIndex < 0 || partIndex >= parts.length) continue;
+    if (endIndex === undefined || !Number.isInteger(endIndex) || endIndex <= 0) continue;
+    if (!Array.isArray(support?.groundingChunkIndices)) continue;
+    for (const chunkIndex of support.groundingChunkIndices) {
+      if (!Number.isInteger(chunkIndex) || !validIndices.has(chunkIndex + 1)) continue;
+      let byOffset = citationsByPart.get(partIndex);
+      if (!byOffset) citationsByPart.set(partIndex, (byOffset = new Map()));
+      let indices = byOffset.get(endIndex);
+      if (!indices) byOffset.set(endIndex, (indices = new Set()));
+      indices.add(chunkIndex + 1);
     }
   }
 
-  const sourceLines = sources.map((s) => `[${s.index}] [${s.title}](${s.url})`);
+  // Keep original part indices even for thoughts and non-text parts not shown to the caller.
+  const visibleParts = parts.map((part) =>
+    !part?.thought && typeof part?.text === "string" ? part.text : "",
+  );
+  const rawText = visibleParts.join("");
+  const annotatedText = visibleParts
+    .map((text, i) => insertPartCitations(text, citationsByPart.get(i)))
+    .join("");
+  const queries = Array.isArray(metadata?.webSearchQueries) ? metadata.webSearchQueries : [];
+  const sourceLines = sources.map(({ index, title, url }) => {
+    const label = title.replace(/[\\[\]]/g, "\\$&");
+    const destination = url.replace(/[()\\]/g, "\\$&");
+    return `[${index}] [${label}](${destination})`;
+  });
   let formattedOutput =
     `Created At: ${createdAt}\n` +
     `Completed At: ${completedAt}\n` +
@@ -161,7 +204,7 @@ export async function performWebSearch(
       ],
       generationConfig: { candidateCount: 1 },
     },
-    model: SEARCH_MODEL,
+    model: options.catalog?.getWebSearchModelId() ?? SEARCH_MODEL,
     userAgent: ANTIGRAVITY_USER_AGENT_TAG,
     requestType: "web_search",
   };
@@ -175,19 +218,17 @@ export async function performWebSearch(
 
   const completedAt = new Date().toISOString();
   const candidate = resp.response?.candidates?.[0];
-  const rawText =
-    candidate?.content?.parts
-      ?.filter((p) => typeof p.text === "string")
-      .map((p) => p.text)
-      .join("") || "";
-
-  return formatSearchResults(
-    rawText,
+  const result = formatSearchResults(
+    candidate?.content?.parts ?? [],
     candidate?.groundingMetadata,
     effectiveQuery,
     createdAt,
     completedAt,
   );
+  if (result.sources.length === 0) {
+    throw new Error("Google Search Grounding returned no web sources.");
+  }
+  return result;
 }
 
 export interface SearchTypeBuilder {
@@ -214,11 +255,9 @@ const FALLBACK_SEARCH_SCHEMA = {
  */
 export function registerWebSearchTool(
   pi: ExtensionAPI,
-  options?: {
+  options?: SearchConfig & {
     client?: AntigravityClient;
     typeBuilder?: SearchTypeBuilder;
-    promptsConfig?: PromptsFileConfig;
-    promptsFile?: string;
   },
 ): void {
   if (typeof pi.registerTool !== "function") return;
@@ -252,6 +291,7 @@ export function registerWebSearchTool(
             query: params.query,
             domain: params.domain,
             signal,
+            catalog: options?.catalog,
             promptsConfig: options?.promptsConfig,
             promptsFile: options?.promptsFile,
           },
@@ -284,6 +324,7 @@ export async function executeWebSearchCommand(
   ctx: ExtensionCommandContext,
   query?: string,
   client?: AntigravityClient,
+  catalog?: SearchConfig["catalog"],
 ): Promise<void> {
   const trimmedQuery = (query || "").trim();
   if (!trimmedQuery) {
@@ -295,7 +336,7 @@ export async function executeWebSearchCommand(
     if (ctx.hasUI) ctx.ui.notify(`Searching: "${trimmedQuery}"…`, "info");
     const result = await performWebSearch(
       ctx,
-      { query: trimmedQuery, signal: ctx.signal },
+      { query: trimmedQuery, signal: ctx.signal, catalog },
       client,
     );
     notifyCommandOutput(ctx, result.formattedOutput);

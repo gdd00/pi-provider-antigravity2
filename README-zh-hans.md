@@ -139,7 +139,7 @@
 > - **你可以自由微调以下 `userModified` 项**：
 >   - `prompts.preamble.userModified`：自定义发给 Antigravity 模型的开场导语（例如改为更贴合你习惯的终端助手身份声明，注意避免写回 `"running inside pi"`）；后面的 `<tools>` / `<rules>` / `<cwd>` 等仍会实时拼接。
 >   - `prompts.systemInstructionRewrites.rules[*].userModified`：修改兜底正则的替换文本（`pattern` 在外层只写一份；将 `userModified` 设为 `null` 可禁用该条规则）。
->   - `prompts.searchSystemInstruction.userModified`：自定义 `antigravity_websearch` 后台联网搜索模型（`gemini-3.5-flash-lite`）的系统提示词。
+>   - `prompts.searchSystemInstruction.userModified`：自定义 `antigravity_websearch` 后台 Gemini 模型的系统提示词。模型取自 Antigravity 缓存目录中的 `webSearchModelIds`；没有可用的搜索模型 ID 时才使用 `gemini-3.5-flash-lite`。
 >   - `prompts.webSearchToolDescription` / `webSearchToolSnippet` / `webSearchToolGuidelines` 的 `userModified`：自定义注册给主模型的 `antigravity_websearch` 工具描述与使用指引（修改工具元信息后重启或 `/reload` Pi 生效；其余项在下一轮对话立即生效）。
 > - **安全性与重置**：`piVersion` 未变化时跳过提取 Pi 提示词，但每次启动仍会校验文件结构完整性并保留你的所有 `userModified` 修改；若删除 `userModified` 下某个字段或删掉整份文件，下次启动会自动按 `extensionBuiltIn` 重建。
 
@@ -198,7 +198,7 @@ pi -e /path/to/repo
 - **`/antigravity settings`**：交互式配置界面（写入 `~/.pi/agent/pi-provider-antigravity.json`）：
   - `Quota footer`（`"off"` / `"smart"` / `"all"`）：底部状态栏配额显示模式
   - `Unsigned tool calls`（`"fail"` / `"skip"`）：处理跨 Provider 丢失 `thoughtSignature` 的策略
-- **`/antigravity websearch <query>`** & **`antigravity_websearch` 工具**：基于原生 HTTP Google Search Grounding 的联网检索与内联引用来源
+- **`/antigravity websearch <query>`** & **`antigravity_websearch` 工具**：通过原生 HTTP 调用 Google Search Grounding，并添加内联来源引用。没有网页来源的回复会报告为搜索失败。
 
 ---
 

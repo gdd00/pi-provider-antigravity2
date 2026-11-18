@@ -139,7 +139,7 @@ To bypass the synthetic 429 check **while preserving Pi's coding capabilities an
 > - **Fields you can customize under `userModified`**:
 >   - `prompts.preamble.userModified`: Customize the opening system prompt sent to Antigravity models (for example, your preferred terminal assistant persona — avoid reintroducing `"running inside pi"`). Live `<tools>`, `<rules>`, and `<cwd>` sections are still appended dynamically.
 >   - `prompts.systemInstructionRewrites.rules[*].userModified`: Edit fallback regex replacement text (`pattern` appears once at the rule level; set `userModified` to `null` to disable a rule).
->   - `prompts.searchSystemInstruction.userModified`: Customize the system instruction sent to the background search model (`gemini-3.5-flash-lite`) for `antigravity_websearch`.
+>   - `prompts.searchSystemInstruction.userModified`: Customize the system instruction sent to the background Gemini model for `antigravity_websearch`. The model comes from the cached Antigravity catalog's `webSearchModelIds`, with `gemini-3.5-flash-lite` as a fallback when no search ID is available.
 >   - `prompts.webSearchToolDescription` / `webSearchToolSnippet` / `webSearchToolGuidelines` `userModified`: Customize the `antigravity_websearch` tool description, `<tools>` snippet, and `<rules>` guidelines exposed to the main model (restart or `/reload` Pi for tool registration edits; all other edits take effect on the very next turn).
 > - **Safety & Reset**: When `piVersion` is unchanged, extracting Pi's prompt is skipped, while file integrity is still checked on startup without overwriting your `userModified` customizations. Delete any key in `userModified` (or delete the whole file) and restart Pi to reset it to `extensionBuiltIn`.
 
@@ -198,7 +198,7 @@ If you already have a Google OAuth refresh token (for headless servers, containe
 - **`/antigravity settings`**: Interactive settings dialog (persisted to `~/.pi/agent/pi-provider-antigravity.json`):
   - `Quota footer` (`"off"` / `"smart"` / `"all"`): Status footer quota display mode
   - `Unsigned tool calls` (`"fail"` / `"skip"`): Handling policy when cross-provider history loses a `thoughtSignature`
-- **`/antigravity websearch <query>`** & **`antigravity_websearch` tool**: Native HTTP Google Search Grounding with inline source citations
+- **`/antigravity websearch <query>`** & **`antigravity_websearch` tool**: Native HTTP Google Search Grounding with inline source citations. Responses without web sources are reported as search failures.
 
 ---
 

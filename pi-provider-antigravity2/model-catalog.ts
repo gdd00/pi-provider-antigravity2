@@ -84,6 +84,7 @@ export interface AvailableModelsCatalog {
   models: AvailableModelItem[];
   modelEnums: Record<string, string>;
   agentModelSorts?: string[];
+  webSearchModelIds?: string[];
 }
 
 export interface CatalogThinking {
@@ -95,6 +96,7 @@ export interface CatalogSnapshot {
   enums: Record<string, string>;
   runtimeIds: string[];
   thinking: Record<string, CatalogThinking>;
+  webSearchModelIds?: string[];
 }
 
 export interface CatalogGeneration {
@@ -107,6 +109,7 @@ export interface PersistedSnapshot {
   modelEnums: Record<string, string>;
   runtimeIds: string[];
   thinking: Record<string, CatalogThinking>;
+  webSearchModelIds?: string[];
 }
 
 export interface ThinkingConfig {
@@ -145,6 +148,7 @@ export interface ModelCatalog {
   refresh(context: RefreshContext): Promise<Array<AnyModel>>;
   bootstrapFromDiskOrAuth(options?: BootstrapCatalogOptions): Promise<BootstrapCatalogResult>;
   refreshGeneration(doRefresh: () => unknown): Promise<CatalogRefreshOutcome>;
+  getWebSearchModelId(): string | undefined;
   resolvePlan(publicModelId: string, effort?: string): ModelPlan;
   formatList(): string;
 }
@@ -166,21 +170,36 @@ export function buildThinkingMap(
   );
 }
 
+function parseWebSearchModelIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = new Set<string>();
+  for (const id of value) {
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (trimmed) ids.add(trimmed);
+  }
+  return ids.size ? [...ids] : undefined;
+}
+
 function snapshotFromCatalog(catalog: AvailableModelsCatalog): CatalogSnapshot {
+  const webSearchModelIds = parseWebSearchModelIds(catalog.webSearchModelIds);
   return {
     enums: { ...catalog.modelEnums },
     runtimeIds: [...new Set(catalog.models.map((m) => m.id))],
     thinking: buildThinkingMap(catalog.models),
+    ...(webSearchModelIds && { webSearchModelIds }),
   };
 }
 
 function copySnapshot(snapshot: CatalogSnapshot): CatalogSnapshot {
+  const webSearchModelIds = parseWebSearchModelIds(snapshot.webSearchModelIds);
   return {
     enums: { ...snapshot.enums },
     runtimeIds: [...snapshot.runtimeIds],
     thinking: Object.fromEntries(
       Object.entries(snapshot.thinking).map(([id, info]) => [id, { ...info }]),
     ),
+    ...(webSearchModelIds && { webSearchModelIds }),
   };
 }
 
@@ -240,18 +259,23 @@ export function parseAvailableModels(data: any): AvailableModelsCatalog {
 
   models.sort((a, b) => a.id.localeCompare(b.id));
 
+  // These are ordered search backend IDs, not necessarily public chat models.
+  const webSearchModelIds = parseWebSearchModelIds(data.webSearchModelIds);
   return {
     models,
     modelEnums,
     ...(agentModelSorts.length > 0 ? { agentModelSorts } : {}),
+    ...(webSearchModelIds && { webSearchModelIds }),
   };
 }
 
 function toPersistedSnapshot(snapshot: CatalogSnapshot): PersistedSnapshot {
+  const { webSearchModelIds } = snapshot;
   return {
     modelEnums: { ...snapshot.enums },
     runtimeIds: [...snapshot.runtimeIds],
     thinking: { ...snapshot.thinking },
+    ...(webSearchModelIds && { webSearchModelIds: [...webSearchModelIds] }),
   };
 }
 
@@ -283,8 +307,14 @@ function fromPersistedSnapshot(raw: unknown): CatalogSnapshot | undefined {
     ? entry.runtimeIds.filter((id): id is string => typeof id === "string")
     : undefined;
   const thinking = isThinkingRecord(entry.thinking) ? entry.thinking : undefined;
-  if (!enums && !runtimeIds && !thinking) return undefined;
-  return { enums: enums ?? {}, runtimeIds: runtimeIds ?? [], thinking: thinking ?? {} };
+  const webSearchModelIds = parseWebSearchModelIds(entry.webSearchModelIds);
+  if (!enums && !runtimeIds && !thinking && !webSearchModelIds) return undefined;
+  return {
+    enums: enums ?? {},
+    runtimeIds: runtimeIds ?? [],
+    thinking: thinking ?? {},
+    ...(webSearchModelIds && { webSearchModelIds }),
+  };
 }
 
 function resolveRuntimeModelId(
@@ -607,10 +637,11 @@ export function createModelCatalog(deps?: {
   };
 
   const toPersisted = (): PersistedSnapshot | undefined => {
-    if (generation.version === 0 && generation.snapshot.runtimeIds.length === 0) {
+    const { version, snapshot } = generation;
+    if (version === 0 && snapshot.runtimeIds.length === 0 && !snapshot.webSearchModelIds) {
       return undefined;
     }
-    return toPersistedSnapshot(generation.snapshot);
+    return toPersistedSnapshot(snapshot);
   };
 
   const buildPersistPayload = (models: Array<AnyModel>) => ({
@@ -769,6 +800,7 @@ export function createModelCatalog(deps?: {
     refresh,
     bootstrapFromDiskOrAuth,
     refreshGeneration,
+    getWebSearchModelId: () => generation.snapshot.webSearchModelIds?.[0],
     resolvePlan: (publicModelId, effort) =>
       resolveModelPlan(publicModelId, effort, generation.snapshot),
     formatList: () =>

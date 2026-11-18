@@ -116,7 +116,7 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
   });
 
   quotaStatus.bind(pi);
-  registerWebSearchTool(pi, { client, typeBuilder: Type, promptsFile });
+  registerWebSearchTool(pi, { client, catalog, typeBuilder: Type, promptsFile });
 
   pi.registerCommand(PROVIDER_ID, {
     description: "Inspect Antigravity usage, models, and settings",

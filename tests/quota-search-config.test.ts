@@ -16,7 +16,7 @@ import {
   writeProviderConfigAtomically,
 } from "../pi-provider-antigravity2/config.ts";
 import { createModelCatalog } from "../pi-provider-antigravity2/model-catalog.ts";
-import type { AntigravityClient } from "../pi-provider-antigravity2/protocol.ts";
+import { createAntigravityClient, type AntigravityClient } from "../pi-provider-antigravity2/protocol.ts";
 import { createQuotaStatus, formatQuotaSummary, parseQuotaSummary } from "../pi-provider-antigravity2/quota-status.ts";
 import { formatSearchResults, performWebSearch, registerWebSearchTool, SEARCH_MODEL, WEB_SEARCH_TOOL_NAME } from "../pi-provider-antigravity2/search.ts";
 import {
@@ -198,7 +198,7 @@ test("search module formats grounding citations and queries v1internal:generateC
   let capturedBody: any;
   const mockClient: AntigravityClient = {
     async fetchAvailableModels() {
-      return {};
+      assert.fail("search must use the cached model catalog");
     },
     async postJson(_source, apiPath, body) {
       capturedPath = apiPath;
@@ -238,6 +238,8 @@ test("search module formats grounding citations and queries v1internal:generateC
   assert.match(res.formattedOutput, /Result body\[1\]/);
 
   // Tool registration executes cleanly and maps missing auth to a friendly error message.
+  const catalog = createModelCatalog();
+  catalog.record({ webSearchModelIds: ["gemini-search-primary", "gemini-search-secondary"] });
   let registeredTool: any;
   registerWebSearchTool(
     {
@@ -245,11 +247,89 @@ test("search module formats grounding citations and queries v1internal:generateC
         registeredTool = def;
       },
     } as any,
-    { client: mockClient },
+    { client: mockClient, catalog },
   );
   assert.equal(registeredTool.name, WEB_SEARCH_TOOL_NAME);
   const authErrResult = await registeredTool.execute("tc-1", { query: "abc" }, undefined, undefined, {});
   assert.equal(authErrResult.details.error, "not_logged_in");
+
+  const ctx = {
+    apiKey: "ya29.ok",
+    hasUI: true,
+    ui: { notify: () => {} },
+  };
+  const toolResult = await registeredTool.execute("tc-2", { query: "abc" }, undefined, undefined, ctx);
+  assert.equal(capturedBody.model, "gemini-search-primary");
+  assert.deepEqual(toolResult.details.sources, res.sources);
+
+  catalog.record({ webSearchModelIds: ["gemini-search-updated"] });
+  const cmds = createAntigravityCommands({ client: mockClient, catalog });
+  await cmds.handle("websearch node test runner", ctx as any);
+  assert.equal(capturedBody.model, "gemini-search-updated");
+});
+
+test("search citations use UTF-8 boundaries in original response parts", () => {
+  const result = formatSearchResults(
+    [
+      { text: "中文😀。 Next" },
+      {},
+      { text: "internal thought", thought: true },
+      { text: "：第二段🎉！ End" },
+    ],
+    {
+      groundingChunks: [
+        { web: { title: "Doc [one]", uri: "https://example.org/(one)" } },
+        {},
+        { web: { title: "Doc three", uri: "https://example.org/three" } },
+        { web: { uri: "javascript:alert(1)" } },
+      ],
+      groundingSupports: [
+        { segment: { endIndex: Buffer.byteLength("中文😀。") }, groundingChunkIndices: [0, 1, 0, -1, 99] },
+        { segment: { endIndex: Buffer.byteLength("中文😀。") }, groundingChunkIndices: [2, 0] },
+        { segment: { endIndex: 7 }, groundingChunkIndices: [0] },
+        { segment: { endIndex: 200 }, groundingChunkIndices: [0] },
+        { segment: { partIndex: 1, endIndex: 1 }, groundingChunkIndices: [0] },
+        { segment: { partIndex: 2, endIndex: 8 }, groundingChunkIndices: [0] },
+        { segment: { partIndex: 3, endIndex: Buffer.byteLength("：第二段🎉！") }, groundingChunkIndices: [2, 3] },
+        { segment: { partIndex: 5, endIndex: 1 }, groundingChunkIndices: [0] },
+      ],
+    },
+    "中文搜索",
+    "start",
+    "end",
+  );
+  assert.equal(result.rawText, "中文😀。 Next：第二段🎉！ End");
+  assert.equal(result.formattedOutput.split("\n")[3], "中文😀。[1][3] Next：第二段🎉！[3] End");
+  assert.deepEqual(result.sources.map(({ index }) => index), [1, 3]);
+  assert.ok(result.formattedOutput.includes(String.raw`[1] [Doc \[one\]](https://example.org/\(one\))`));
+});
+
+test("search rejects ungrounded answers and does not retry HTTP errors with a different model", async () => {
+  const catalog = createModelCatalog();
+  catalog.record({ webSearchModelIds: ["gemini-search-primary", "gemini-search-secondary"] });
+  const hits: Array<{ path: string; model: string }> = [];
+  let status = 200;
+  const client = createAntigravityClient({
+    fetch: async (input, init) => {
+      hits.push({ path: new URL(String(input)).pathname, model: JSON.parse(String(init?.body)).model });
+      return Response.json({
+        response: {
+          candidates: [{
+            content: { parts: [{ text: "An ungrounded answer" }] },
+            groundingMetadata: { webSearchQueries: ["query"], groundingChunks: [{}] },
+          }],
+        },
+      }, { status });
+    },
+  });
+  const run = () => performWebSearch("ya29.ok", { catalog, query: "query" }, client);
+  await assert.rejects(run, /Google Search Grounding returned no web sources/);
+  for (status of [401, 429]) {
+    await assert.rejects(run, { status });
+  }
+  assert.deepEqual(hits, Array.from({ length: 3 }, () => ({
+    path: "/v1internal:generateContent", model: "gemini-search-primary",
+  })));
 });
 
 test("commands module completes subcommands and routes usage, models, refresh, login, and help", async () => {

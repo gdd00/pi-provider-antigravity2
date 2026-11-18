@@ -301,7 +301,14 @@ test("userModified takes effect in builder, search, and tool registration while 
       },
       async postJson(_source, _path, body: any) {
         capturedSearchSys = body.request.systemInstruction.parts[0].text;
-        return { response: { candidates: [{ content: { parts: [{ text: "ok" }] } }] } };
+        return {
+          response: {
+            candidates: [{
+              content: { parts: [{ text: "ok" }] },
+              groundingMetadata: { groundingChunks: [{ web: { uri: "https://example.com" } }] },
+            }],
+          },
+        };
       },
     };
     await performWebSearch(
