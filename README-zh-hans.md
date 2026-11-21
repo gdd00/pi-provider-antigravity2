@@ -190,6 +190,10 @@ pi -e /path/to/repo
 - `access` 与 `expires`：保持 `""` 和 `0` 即可。下次启动 Pi（或首次刷新模型/发起对话）时，扩展会自动用 `refresh` 换取 `access_token` 并解析 `projectId`。
 - 建议将权限收紧为仅当前用户可读：`chmod 600 ~/.pi/agent/auth.json`。
 
+### 空闲断连
+
+启动后或 agent 循环停止后（包括报错、按 Esc 取消），连续 90 秒没有新提示词，扩展会中止 Antigravity 请求并阻止后台联网，包括额度刷新和缓存预热。选中 Antigravity 模型时，Pi 在输入框上方显示 `pi-provider-antigravity2: disconnected (AFK)`，不改动草稿。发送新提示词或执行 `/antigravity` 命令即可按需恢复，无需重新登录，不影响其他 provider。
+
 ### 💬 内置命令与工具
 
 - **`/antigravity usage`**：查看当前 5 小时与每周配额池进度条及重置时间

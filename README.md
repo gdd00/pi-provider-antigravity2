@@ -190,6 +190,10 @@ If you already have a Google OAuth refresh token (for headless servers, containe
 - `access` & `expires`: Leave as `""` and `0`. On the next Pi startup (or first model refresh / prompt), the extension exchanges `refresh` for an `access_token` and resolves `projectId` automatically.
 - Restrict file permissions to owner-only: `chmod 600 ~/.pi/agent/auth.json`.
 
+### Idle disconnect
+
+After 90 seconds idle at startup or after an agent run settles (including errors and Escape), the extension aborts outstanding Antigravity requests and blocks background traffic, including quota refresh and cache warming. With an Antigravity model selected, Pi displays `pi-provider-antigravity2: disconnected (AFK)` above the editor. Sending a new prompt or running an `/antigravity` command resumes access on demand; no login is required. Other providers are unaffected.
+
 ### 💬 Built-in Commands & Tool
 
 - **`/antigravity usage`**: Show remaining 5h & weekly quota bars and reset timers

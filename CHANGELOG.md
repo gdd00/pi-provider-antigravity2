@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Disconnect Antigravity after 90 seconds idle. Stop background requests, show AFK status above the Pi editor, and resume on the next prompt or provider command.
+
 ## [0.1.1] - 2026-11-15
 
 ### Added

@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsList } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { bindProviderAfk } from "./afk.ts";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth.ts";
 import { createAntigravityCommands } from "./commands.ts";
 import { getAgentDir } from "./config.ts";
@@ -20,7 +21,7 @@ import { initializePromptSync } from "./prompts.ts";
 import { createModelCatalog } from "./model-catalog.ts";
 import {
   DEFAULT_ENDPOINT,
-  defaultAntigravityClient,
+  createAntigravityClient,
   PROVIDER_ID,
   PROVIDER_NAME,
 } from "./protocol.ts";
@@ -44,8 +45,9 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
   const agentDir = getAgentDir();
   const promptsFile = initializePromptSync(pi, { agentDir, piVersion: PI_VERSION });
 
-  const client = defaultAntigravityClient;
-  const catalog = createModelCatalog({ client });
+  const afk = bindProviderAfk(pi);
+  const client = createAntigravityClient({ fetch: afk.fetch });
+  const catalog = createModelCatalog({ client, fetchImpl: afk.fetch });
   const quotaStatus = createQuotaStatus({ client });
   const commands = createAntigravityCommands({
     quotaStatus,
@@ -90,15 +92,26 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
     oauth: {
       name: PROVIDER_NAME,
       isSubscription: true,
-      login: loginAntigravity,
-      refreshToken: refreshAntigravityToken,
+      login: (callbacks) => {
+        afk.activity();
+        return loginAntigravity({
+          ...callbacks,
+          onPrompt: async (prompt) => {
+            const answer = await callbacks.onPrompt(prompt);
+            afk.activity(); // The browser login can take longer than 90 seconds.
+            return answer;
+          },
+        }, afk.fetch);
+      },
+      refreshToken: (credentials, signal) =>
+        refreshAntigravityToken(credentials, afk.signal(signal), afk.fetch),
       getApiKey,
     },
     streamSimple: (model, context, options) =>
       streamAntigravity(
         model,
         context,
-        options as AntigravityStreamOptions | undefined,
+        { ...(options as AntigravityStreamOptions | undefined), signal: afk.signal(options?.signal) },
         catalog,
         client,
         {
@@ -110,17 +123,24 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
             getCurrentTools,
           },
         },
-        { promptsFile },
+        { promptsFile, fetchImpl: afk.fetch },
       ),
-    refreshModels: async (context) => catalog.refresh(context),
+    refreshModels: (context) => catalog.refresh({
+      ...context,
+      allowNetwork: context.allowNetwork && !afk.signal().aborted,
+      signal: afk.signal(context.signal),
+    }),
   });
 
-  quotaStatus.bind(pi);
+  quotaStatus.bind(pi, () => !afk.signal().aborted);
   registerWebSearchTool(pi, { client, catalog, typeBuilder: Type, promptsFile });
 
   pi.registerCommand(PROVIDER_ID, {
     description: "Inspect Antigravity usage, models, and settings",
     getArgumentCompletions: (prefix) => commands.complete(prefix),
-    handler: async (args, ctx) => commands.handle(args, ctx),
+    handler: async (args, ctx) => {
+      afk.activity(); // Slash commands bypass Pi's input event.
+      await commands.handle(args, ctx);
+    },
   });
 }

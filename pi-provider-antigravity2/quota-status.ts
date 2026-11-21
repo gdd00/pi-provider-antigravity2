@@ -106,7 +106,7 @@ export interface QuotaStatusDeps {
 }
 
 export interface QuotaStatus {
-  bind(pi: ExtensionAPI): void;
+  bind(pi: ExtensionAPI, allowRefresh?: () => boolean): void;
   formatUsage(ctx: ExtensionCommandContext & { signal?: AbortSignal }): Promise<string>;
   inspectUsage(ctx: QuotaStatusCtx & { signal?: AbortSignal }): Promise<string>;
   mode(): QuotaFooterMode;
@@ -449,21 +449,19 @@ export class QuotaStatusCoordinator implements QuotaStatus {
     return this.store.loadMode();
   }
 
-  bind(pi: ExtensionAPI): void {
+  bind(pi: ExtensionAPI, allowRefresh = () => true): void {
     if (typeof pi?.on !== "function") return;
-    pi.on("session_start", async (_event, ctx) => {
-      await this.refreshAndPaint(ctx);
-    });
+    const update = (ctx: QuotaStatusCtx) =>
+      allowRefresh() ? this.refreshAndPaint(ctx) : this.paint(ctx);
+    pi.on("session_start", (_event, ctx) => update(ctx));
     pi.on("model_select", async (event, ctx) => {
-      await this.refreshAndPaint({
+      await update({
         ui: ctx.ui,
         modelRegistry: ctx.modelRegistry,
         model: event.model || ctx.model,
       });
     });
-    pi.on("agent_settled", async (_event, ctx) => {
-      await this.refreshAndPaint(ctx);
-    });
+    pi.on("agent_settled", (_event, ctx) => update(ctx));
   }
 
   formatUsage(ctx: ExtensionCommandContext & { signal?: AbortSignal }): Promise<string> {
