@@ -13,12 +13,12 @@ An **Antigravity (Google Cloud Code Assist `v1internal`)** provider extension fo
 
 ---
 
-## 🧠 Core Principle: 100% Native Pi Core, Zero `agy` Dependency
+## 🧠 Native Pi Core, Optional `agy` Setup
 
 This extension is **strictly a Pi provider, auth, and protocol adapter**:
 
 - **⚙️ Full Pi Core Agent Loop & Built-in Tools**: All conversation turns, context management, reasoning, and native tool execution (`read`, `bash`, `edit`, `write`, etc.) are **100% executed by `pi` itself**.
-- **🚫 Zero `agy` Dependency**: Never invokes `/usr/bin/agy` or any external CLI subprocess (`child_process` is never used anywhere), and carries zero third-party runtime npm dependencies.
+- **Optional `agy` Setup**: Pi runs conversations and refreshes tokens itself, with no third-party runtime npm dependencies. On Linux, the extension can run `agy` during `/login antigravity` or `/antigravity sync-client` to refresh its OAuth client configuration.
 - **🌐 Direct Cloud Code Assist HTTP/SSE**: Speaks directly to `https://daily-cloudcode-pa.googleapis.com/v1internal` over native `fetch`, supporting streaming responses, `xhigh` thinking levels (e.g. `thinkingLevel: 100`), multi-turn `thoughtSignature` preservation, and cross-family tool history compatibility.
 
 ---
@@ -33,10 +33,10 @@ This package does **not** ship built-in Google OAuth client credentials. Interac
 
 **Automatic Setup via `/login antigravity` (Recommended):**
 
-When you run `/login antigravity` without pre-configured credentials:
-1. The extension prompts you to paste either your `client_id` or the **full `agy` Google login URL** (easy to copy directly from `agy`'s login prompt/browser address bar).
-2. It **automatically scans your local `agy` binary on disk** (pure file read, never executing `agy` as a subprocess), identifies the matching 35-character `GOCSPX-...` client secret, and **persists both `oauthClientId` and `oauthClientSecret` to `~/.pi/agent/pi-provider-antigravity.json`** (mode `0600`).
-3. If `agy` is not installed on that machine, it falls back to prompting for `client_secret` once and still persists both fields for future logins and automatic token refreshes.
+Every time you run `/login antigravity`:
+1. The extension runs `agy acp --login` in a temporary profile with stdin closed and reads `client_id` from the official Google login URL. It does not open a browser or complete an `agy` login.
+2. The extension reads the local binary to find the matching Client Secret and build the HTTP User-Agent. If it cannot verify a fresh pair, it reuses the saved pair, or prompts for missing values. Explicit OAuth environment overrides still take precedence.
+3. Authorize Pi in your browser and paste the authorization code. After the token exchange succeeds, changed values are saved to `~/.pi/agent/pi-provider-antigravity.json`. A failed or cancelled exchange does not replace saved values.
 
 **Manual Extraction / Configuration (Optional):**
 
@@ -95,6 +95,14 @@ When you run `/login antigravity` without pre-configured credentials:
    - Packs `{ token, projectId }` into the stored `access` field and preserves known non-fallback `projectId` values across refreshes.
    - Automatically triggers a single token refresh and retry on HTTP `401` during cold start or streaming.
    - Headless cold-start support: bootstraps the model catalog from `~/.pi/agent/models-store.json` or `~/.pi/agent/auth.json` so offline or first-time launches never fail with `Unknown provider "antigravity"`.
+
+---
+
+## HTTP User-Agent Override
+
+`/login antigravity` reads the version and build changelist (`cl`) from the local `agy` binary on disk; this step doesn't run `agy`. If both are recognized, it saves the resulting HTTP `userAgent` under the top level of `$PI_CODING_AGENT_DIR/pi-provider-antigravity.json` (default `~/.pi/agent/pi-provider-antigravity.json`). This also runs when OAuth client credentials are already configured; rerun login after upgrading `agy` to refresh the value.
+
+If `agy` is missing or its build metadata is unrecognized, login leaves the existing `userAgent` alone. You can set it manually to a single-line ASCII string. If unset, the extension uses the built-in default for your OS and architecture.
 
 ---
 
@@ -199,6 +207,7 @@ After 90 seconds idle at startup or after an agent run settles (including errors
 - **`/antigravity usage`**: Show remaining 5h & weekly quota bars and reset timers
 - **`/antigravity models`**: List recommended/available models with context window and remaining quota
 - **`/antigravity refresh`**: Force-refresh the model catalog
+- **`/antigravity sync-client`**: Sync OAuth Client ID, Secret, and User-Agent from local `agy`. If the Client ID changed and Pi is already logged in, the command can update the User-Agent but keeps the existing OAuth pair; run `/login antigravity` to switch.
 - **`/antigravity settings`**: Interactive settings dialog (persisted to `~/.pi/agent/pi-provider-antigravity.json`):
   - `Quota footer` (`"off"` / `"smart"` / `"all"`): Status footer quota display mode
   - `Unsigned tool calls` (`"fail"` / `"skip"`): Handling policy when cross-provider history loses a `thoughtSignature`

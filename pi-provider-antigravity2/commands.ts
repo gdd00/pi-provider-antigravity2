@@ -1,5 +1,10 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { NOT_LOGGED_IN, resolveCredentials } from "./auth.ts";
+import {
+  AntigravityAuthError,
+  NOT_LOGGED_IN,
+  resolveCredentials,
+  syncAntigravityClient,
+} from "./auth.ts";
 import { notifyCommandOutput, openSettings, type SettingsUiDeps } from "./config.ts";
 import type { ModelCatalog } from "./model-catalog.ts";
 import { type AntigravityClient, PROVIDER_ID } from "./protocol.ts";
@@ -17,6 +22,7 @@ export interface AntigravityCommandsDeps {
   quotaStatus?: QuotaStatus;
   catalog: ModelCatalog;
   client?: AntigravityClient;
+  syncClient?: typeof syncAntigravityClient;
   uiDeps?: SettingsUiDeps;
 }
 
@@ -30,6 +36,7 @@ interface SubcommandContext {
   quotaStatus?: QuotaStatus;
   catalog: ModelCatalog;
   client?: AntigravityClient;
+  syncClient?: typeof syncAntigravityClient;
   uiDeps?: SettingsUiDeps;
   subArgs?: string;
 }
@@ -108,6 +115,34 @@ async function runRefreshSubcommand(
   }
 }
 
+async function runSyncClientSubcommand(
+  ctx: ExtensionCommandContext,
+  syncClient = syncAntigravityClient,
+): Promise<void> {
+  if (ctx.hasUI) ctx.ui.notify("Syncing client settings from local agy…", "info");
+  try {
+    const { oauth, userAgent } = await syncClient(ctx.signal);
+    const oauthMessage = {
+      updated: "OAuth client credentials updated.",
+      unchanged: "OAuth client credentials already current.",
+      "login-required": "Client ID has changed. Existing OAuth credentials kept; run /login antigravity.",
+      overridden: "OAuth client credentials kept because environment overrides are set.",
+      unavailable: "Could not verify OAuth client credentials from local agy. Existing values kept.",
+    }[oauth];
+    const userAgentMessage = {
+      updated: "User-Agent updated.",
+      unchanged: "User-Agent already current.",
+      unavailable: "Could not read agy build metadata. User-Agent kept.",
+    }[userAgent];
+    const warning = (oauth !== "updated" && oauth !== "unchanged") || userAgent === "unavailable";
+    notifyCommandOutput(ctx, `${oauthMessage} ${userAgentMessage}`, warning ? "warning" : "info");
+  } catch (error) {
+    if (ctx.signal?.aborted) return;
+    const reason = error instanceof AntigravityAuthError ? ` ${error.message}` : "";
+    notifyCommandOutput(ctx, `Failed to sync Antigravity client settings.${reason}`, "error");
+  }
+}
+
 function runLoginSubcommand(ctx: ExtensionCommandContext): void {
   if (ctx.hasUI) {
     ctx.ui.setEditorText("/login antigravity");
@@ -133,6 +168,11 @@ const SUBCOMMANDS: readonly SubcommandDef[] = Object.freeze([
     name: "refresh",
     description: "Fetch the latest model list",
     run: ({ ctx, catalog }) => runRefreshSubcommand(ctx, catalog),
+  },
+  {
+    name: "sync-client",
+    description: "Sync OAuth client credentials and User-Agent from local agy",
+    run: ({ ctx, syncClient }) => runSyncClientSubcommand(ctx, syncClient),
   },
   {
     name: "settings",
@@ -194,6 +234,7 @@ export function createAntigravityCommands(deps: AntigravityCommandsDeps): Antigr
           quotaStatus: deps.quotaStatus,
           catalog: deps.catalog,
           client: deps.client,
+          syncClient: deps.syncClient,
           uiDeps: deps.uiDeps,
           subArgs,
         });

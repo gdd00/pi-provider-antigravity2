@@ -13,7 +13,7 @@ import {
 import { SettingsList } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { bindProviderAfk } from "./afk.ts";
-import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth.ts";
+import { getApiKey, loginAntigravity, refreshAntigravityToken, syncAntigravityClient } from "./auth.ts";
 import { createAntigravityCommands } from "./commands.ts";
 import { getAgentDir } from "./config.ts";
 import { PROVIDER_API } from "./constants.ts";
@@ -53,6 +53,7 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
     quotaStatus,
     catalog,
     client,
+    syncClient: (signal) => syncAntigravityClient(afk.signal(signal), afk.fetch),
     uiDeps: {
       getSettingsListTheme,
       createSettingsList: (items, maxVisible, theme, onChange, onCancel) =>
@@ -136,7 +137,7 @@ export default async function antigravityProviderExtension(pi: ExtensionAPI) {
   registerWebSearchTool(pi, { client, catalog, typeBuilder: Type, promptsFile });
 
   pi.registerCommand(PROVIDER_ID, {
-    description: "Inspect Antigravity usage, models, and settings",
+    description: "Manage Antigravity usage, models, client settings, and login",
     getArgumentCompletions: (prefix) => commands.complete(prefix),
     handler: async (args, ctx) => {
       afk.activity(); // Slash commands bypass Pi's input event.

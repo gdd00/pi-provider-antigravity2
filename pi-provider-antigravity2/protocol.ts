@@ -4,6 +4,7 @@ import {
   requireCredentials,
   resolveCredentials,
 } from "./auth.ts";
+import { resolveAntigravityUserAgent } from "./config.ts";
 import {
   DEFAULT_ENDPOINT,
   DEFAULT_HOST,
@@ -98,7 +99,7 @@ async function postAntigravityRaw({
   auth,
   path,
   endpoint = DEFAULT_ENDPOINT,
-  userAgent = DEFAULT_USER_AGENT,
+  userAgent = resolveAntigravityUserAgent(),
   headers,
   body,
   signal,
@@ -182,22 +183,25 @@ export interface AntigravityClient {
 export function createAntigravityClient(options?: {
   endpoint?: string;
   userAgent?: string;
+  configFile?: string;
   fetch?: typeof fetch;
 }): AntigravityClient {
   const endpoint = options?.endpoint || DEFAULT_ENDPOINT;
-  const userAgent = options?.userAgent || DEFAULT_USER_AGENT;
+  const getUserAgent = () => options?.userAgent || resolveAntigravityUserAgent(options?.configFile);
   const fetchImpl = options?.fetch || fetch;
 
   return {
     endpoint,
-    userAgent,
+    get userAgent() {
+      return getUserAgent();
+    },
 
     async fetchAvailableModels(source?: CredentialSource, signal?: AbortSignal): Promise<any> {
       const creds = await requireCredentials(source);
       return postAntigravityJson<any>({
         auth: creds.token,
         endpoint,
-        userAgent,
+        userAgent: getUserAgent(),
         path: "v1internal:fetchAvailableModels",
         body: { project: creds.projectId },
         signal,
@@ -211,7 +215,7 @@ export function createAntigravityClient(options?: {
       return postAntigravityJson<any>({
         auth: creds.token,
         endpoint,
-        userAgent,
+        userAgent: getUserAgent(),
         path: "v1internal:retrieveUserQuotaSummary",
         body: { project: creds.projectId },
         signal,
@@ -230,7 +234,7 @@ export function createAntigravityClient(options?: {
       return postAntigravityStream({
         auth: creds.token,
         endpoint: overrideEndpoint || endpoint,
-        userAgent,
+        userAgent: getUserAgent(),
         path: "v1internal:streamGenerateContent?alt=sse",
         headers,
         body,
@@ -254,7 +258,7 @@ export function createAntigravityClient(options?: {
       return postAntigravityJson<T>({
         auth: creds.token,
         endpoint,
-        userAgent,
+        userAgent: getUserAgent(),
         path,
         headers,
         body: mergedBody,

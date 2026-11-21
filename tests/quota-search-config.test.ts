@@ -332,7 +332,7 @@ test("search rejects ungrounded answers and does not retry HTTP errors with a di
   })));
 });
 
-test("commands module completes subcommands and routes usage, models, refresh, login, and help", async () => {
+test("commands module completes subcommands and routes usage, models, sync-client, login, and help", async () => {
   const catalog = createModelCatalog();
   catalog.record({
     models: {
@@ -356,17 +356,30 @@ test("commands module completes subcommands and routes usage, models, refresh, l
   });
   (quotaStatus as any).formatUsage = async () => "Usage report ok";
 
-  const cmds = createAntigravityCommands({ quotaStatus, catalog });
-  const allNames = cmds.complete("").map((c) => c.value);
-  assert.deepEqual(allNames, ["usage", "models", "refresh", "settings", "websearch", "login"]);
+  const signal = new AbortController().signal;
+  let syncs = 0;
+  const cmds = createAntigravityCommands({
+    quotaStatus,
+    catalog,
+    async syncClient(commandSignal) {
+      assert.equal(commandSignal, signal);
+      syncs++;
+      return { oauth: "login-required", userAgent: "updated" };
+    },
+  });
+  const allNames = cmds.complete("")?.map((c) => c.value);
+  assert.deepEqual(allNames, ["usage", "models", "refresh", "sync-client", "settings", "websearch", "login"]);
+  assert.equal(cmds.complete("sync-")?.[0]?.description,
+    "Sync OAuth client credentials and User-Agent from local agy");
   assert.deepEqual(
-    cmds.complete("mo").map((c) => c.value),
+    cmds.complete("mo")?.map((c) => c.value),
     ["models"],
   );
 
   const notifications: Array<{ text: string; level?: string }> = [];
   let editorText = "";
   const ctx: any = {
+    signal,
     hasUI: true,
     ui: {
       notify: (text: string, level?: string) => notifications.push({ text, level }),
@@ -382,6 +395,10 @@ test("commands module completes subcommands and routes usage, models, refresh, l
 
   await cmds.handle("usage", ctx);
   await cmds.handle("model", ctx);
+  await cmds.handle("sync-client", ctx);
+  assert.equal(syncs, 1);
+  assert.ok(notifications.some(({ level, text }) =>
+    level === "warning" && text.includes("/login antigravity") && text.includes("User-Agent updated.")));
   await cmds.handle("login", ctx);
   await cmds.handle("unknown-cmd", ctx);
 

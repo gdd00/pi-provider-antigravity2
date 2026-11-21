@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Disconnect Antigravity after 90 seconds idle. Stop background requests, show AFK status above the Pi editor, and resume on the next prompt or provider command.
+- On interactive login, rediscover the OAuth Client ID and matching Secret from local `agy` on Linux. Save changes after token exchange succeeds.
+- Add `/antigravity sync-client` to sync local `agy` client settings without replacing existing login tokens.
+- Store the Cloud Code Assist `userAgent` in `pi-provider-antigravity.json` and refresh it from local `agy` build metadata during login.
 
 ## [0.1.1] - 2026-11-15
 

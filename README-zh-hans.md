@@ -13,12 +13,12 @@
 
 ---
 
-## 🧠 核心原则：100% 原生 Pi Core，完全不依赖 `agy`
+## 🧠 原生 Pi Core，登录时可选用 `agy`
 
 本扩展**纯粹是一个 Pi Provider / Auth / 协议适配层**：
 
 - **⚙️ 完全使用 Pi Core 的 Agent Loop 与内置工具**：所有对话循环、上下文管理、思考过程，以及 `read`、`bash`、`edit`、`write` 等原生工具调用，**100% 由 `pi` 自身执行**。
-- **🚫 零 `agy` 依赖**：绝不调用 `/usr/bin/agy` 或任何外部 CLI 子进程（全库不使用 `child_process`），也没有第三方运行时 npm 依赖。
+- **`agy` 仅用于可选登录配置**：日常对话和令牌刷新由 Pi 完成，没有第三方运行时 npm 依赖。Linux 上仅在 `/login antigravity` 或 `/antigravity sync-client` 时尝试运行 `agy`，刷新 OAuth 客户端配置。
 - **🌐 直连 Cloud Code Assist HTTP/SSE**：直接通过原生 `fetch` 对接 `https://daily-cloudcode-pa.googleapis.com/v1internal`，原生支持流式输出、`xhigh` 思考等级（如 `thinkingLevel: 100`）、多轮 `thoughtSignature` 签名保留与跨模型族工具历史兼容。
 
 ---
@@ -33,10 +33,10 @@
 
 **通过 `/login antigravity` 自动提取与保存（推荐）：**
 
-未提前配置凭证时，直接运行 `/login antigravity`：
-1. 扩展会提示你粘贴 `client_id` 或**完整的 `agy` 登录网址**（从 `agy` 登录页面或浏览器地址栏直接整条复制即可，扩展会自动解析出 `client_id`）。
-2. 扩展会**自动读取本机磁盘上的 `agy` 二进制文件**（纯文件读取，不启动 `agy` 子进程），提取并向 Google 验证匹配出对应的 35 位 `GOCSPX-...` Secret，然后**自动持久化保存到 `~/.pi/agent/pi-provider-antigravity.json`**（权限 `0600`），后续登录与自动刷新均无需再输入。
-3. 若当前机器未安装 `agy`（如纯无头服务器），扩展会回退为提示输入一次 `client_secret` 并同样自动持久化保存。
+每次运行 `/login antigravity`：
+1. 在临时目录运行 `agy acp --login`，关闭标准输入，从官方 Google 登录网址提取 `client_id`，不打开浏览器、不完成 `agy` 登录。
+2. 扩展读取本机 `agy` 二进制，查找匹配的 Client Secret 并生成 HTTP User-Agent。无法验证新凭据时，沿用已有的一对；仍缺值才提示手动输入。显式设置的 OAuth 环境变量仍优先。
+3. 用户在浏览器授权 Pi 并粘贴授权码。换取令牌成功后，扩展才把有变化的值写入 `~/.pi/agent/pi-provider-antigravity.json`；换取失败或取消，不覆盖原值。
 
 **手动提取与配置（可选）：**
 
@@ -95,6 +95,14 @@
    - 将 `{ token, projectId }` 打包保存在凭据的 `access` 中，并在每次请求/刷新时自动继承已知的 `projectId`。
    - 冷启动或流式对话遇到 `401` 时自动触发单次 Token 刷新恢复并重试。
    - 支持纯无头冷启动：从 `~/.pi/agent/models-store.json` 或 `~/.pi/agent/auth.json` 预引导模型目录，避免离线或首次启动时报 `Unknown provider "antigravity"`。
+
+---
+
+## 覆盖 HTTP User-Agent
+
+`/login antigravity` 会尝试从本机 `agy` 二进制读取版本和构建号（`cl`）；此步骤不启动 `agy`。两项都识别成功后，扩展会将 HTTP `userAgent` 写入 `$PI_CODING_AGENT_DIR/pi-provider-antigravity.json`（默认 `~/.pi/agent/pi-provider-antigravity.json`）的顶层。OAuth 客户端凭据已配置时也会检查；升级 `agy` 后再次登录即可更新。
+
+如果没装 `agy` 或无法识别构建信息，登录会保留已有的 `userAgent`。也可以手动填写单行 ASCII 字符串；不设置时，扩展按当前系统和架构生成内置默认值。
 
 ---
 
@@ -199,6 +207,7 @@ pi -e /path/to/repo
 - **`/antigravity usage`**：查看当前 5 小时与每周配额池进度条及重置时间
 - **`/antigravity models`**：查看推荐/可用模型、上下文窗口与剩余配额
 - **`/antigravity refresh`**：强制刷新最新模型目录
+- **`/antigravity sync-client`**：从本机 `agy` 同步 OAuth Client ID、Secret 和 User-Agent，已登录且 Client ID 变化时，只更新 User-Agent，保留原 OAuth 凭据；执行 `/login antigravity` 切换。
 - **`/antigravity settings`**：交互式配置界面（写入 `~/.pi/agent/pi-provider-antigravity.json`）：
   - `Quota footer`（`"off"` / `"smart"` / `"all"`）：底部状态栏配额显示模式
   - `Unsigned tool calls`（`"fail"` / `"skip"`）：处理跨 Provider 丢失 `thoughtSignature` 的策略

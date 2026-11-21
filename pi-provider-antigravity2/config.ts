@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { SettingItem, SettingsListTheme } from "@earendil-works/pi-tui";
+import { DEFAULT_USER_AGENT } from "./constants.ts";
 
 export const ANSI_FG_RESET = "\x1b[39m";
 export const PROVIDER_CONFIG_FILE = "pi-provider-antigravity.json";
@@ -10,6 +11,7 @@ export const PROVIDER_CONFIG_FILE = "pi-provider-antigravity.json";
 export interface ProviderFileConfig {
   oauthClientId?: string;
   oauthClientSecret?: string;
+  userAgent?: string;
   settings?: { [key: string]: unknown };
   states?: { [name: string]: { [key: string]: unknown } | undefined };
 }
@@ -73,21 +75,24 @@ export function loadProviderConfig(file = defaultConfigFile()): ProviderFileConf
   return undefined;
 }
 
+/** Resolves a local HTTP User-Agent override, ignoring unusable header values. */
+export function resolveAntigravityUserAgent(file = defaultConfigFile()): string {
+  const value = loadProviderConfig(file)?.userAgent;
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return /^[\x20-\x7e]+$/.test(trimmed) ? trimmed : DEFAULT_USER_AGENT;
+}
+
 /**
- * Atomically writes the provider JSON configuration via a temp file + fsync + rename,
- * preserving any tightened file permissions.
+ * Atomically writes JSON, preserving existing permissions unless a mode is supplied.
  */
-/**
- * Atomically writes any JSON-serializable object via a temp file + fsync + rename,
- * preserving any existing file permissions.
- */
-export function writeJsonAtomically(file: string, data: unknown): boolean {
+export function writeJsonAtomically(file: string, data: unknown, mode?: number): boolean {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const mode = fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : undefined;
-    const fd = fs.openSync(tmp, "w", mode);
+    const existingMode = fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : undefined;
+    const fd = fs.openSync(tmp, "w", mode ?? existingMode);
     try {
+      if (mode !== undefined) fs.fchmodSync(fd, mode);
       fs.writeFileSync(fd, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
       fs.fsyncSync(fd);
     } finally {
@@ -106,7 +111,7 @@ export function writeJsonAtomically(file: string, data: unknown): boolean {
 }
 
 export function writeProviderConfigAtomically(file: string, data: ProviderFileConfig): boolean {
-  return writeJsonAtomically(file, data);
+  return writeJsonAtomically(file, data, data.oauthClientSecret ? 0o600 : undefined);
 }
 
 /**

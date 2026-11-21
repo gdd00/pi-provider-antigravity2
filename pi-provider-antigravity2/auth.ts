@@ -3,8 +3,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { defaultConfigFile, loadProviderConfig, updateProviderConfig } from "./config.ts";
+import { detectAgyLoginClientId, extractAgyBuild } from "./agy.ts";
 import {
+  defaultConfigFile,
+  loadProviderConfig,
+  resolveAntigravityUserAgent,
+  updateProviderConfig,
+} from "./config.ts";
+import {
+  buildAntigravityUserAgent,
   DEFAULT_ENDPOINT,
   DEFAULT_USER_AGENT,
   FALLBACK_PROJECT_ID,
@@ -74,6 +81,10 @@ export interface OAuthClientOptions {
   agyPaths?: string[];
 }
 
+function resolveOAuthConfigFile(options?: OAuthClientOptions): string {
+  return options?.configFile ?? defaultConfigFile(options?.env);
+}
+
 export const MISSING_OAUTH_CLIENT_MSG =
   "Missing Antigravity OAuth client credentials. Set ANTIGRAVITY_CLIENT_ID and " +
   "ANTIGRAVITY_CLIENT_SECRET (or configure oauthClientId and oauthClientSecret in " +
@@ -91,7 +102,7 @@ export function resolveOAuthClientCredentials(
   const fileConfig =
     options?.clientId && options?.clientSecret
       ? undefined
-      : loadProviderConfig(options?.configFile ?? defaultConfigFile(env));
+      : loadProviderConfig(resolveOAuthConfigFile(options));
 
   const clientId =
     options?.clientId?.trim() ||
@@ -154,7 +165,7 @@ function resolveDefaultAgyCandidatePaths(env: NodeJS.ProcessEnv): string[] {
   const pathEnv = env.PATH || "";
   for (const dir of pathEnv.split(path.delimiter)) {
     const trimmed = dir.trim();
-    if (trimmed) candidates.push(path.join(trimmed, exeName));
+    if (path.isAbsolute(trimmed)) candidates.push(path.join(trimmed, exeName));
   }
   if (process.platform !== "win32") {
     candidates.push(
@@ -167,30 +178,48 @@ function resolveDefaultAgyCandidatePaths(env: NodeJS.ProcessEnv): string[] {
   return [...new Set(candidates)];
 }
 
-function readFirstExistingAgyBinary(paths: string[]): Uint8Array | null {
+async function readFirstExistingAgyBinary(
+  paths: string[],
+  signal?: AbortSignal,
+): Promise<{ file: string; bytes: Buffer } | undefined> {
   for (const candidate of paths) {
+    signal?.throwIfAborted();
     try {
-      const stat = fs.statSync(candidate);
+      const stat = await fs.promises.stat(candidate);
       if (stat.isFile() && stat.size > 0) {
-        return fs.readFileSync(candidate);
+        return { file: candidate, bytes: await fs.promises.readFile(candidate, { signal }) };
       }
     } catch {
+      signal?.throwIfAborted();
       // Ignore missing or unreadable candidate paths.
     }
   }
-  return null;
+  return undefined;
+}
+
+function readLocalAgy(options: OAuthClientOptions | undefined, signal?: AbortSignal) {
+  const env = options?.env ?? process.env;
+  return readFirstExistingAgyBinary(options?.agyPaths ?? resolveDefaultAgyCandidatePaths(env), signal);
+}
+
+function userAgentFromAgy(binary: Buffer): string | undefined {
+  const build = extractAgyBuild(binary);
+  return build ? buildAntigravityUserAgent(process.platform, process.arch, build) : undefined;
 }
 
 async function matchClientSecretFromAgy(
   clientId: string,
-  agyPaths: string[],
+  binary: Buffer | undefined,
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const binary = readFirstExistingAgyBinary(agyPaths);
   if (!binary) return null;
+  const timeout = AbortSignal.timeout(5_000);
+  const probeSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const candidates = extractClientSecretCandidates(binary);
   for (const secret of candidates) {
+    signal?.throwIfAborted();
+    if (timeout.aborted) break;
     try {
       const res = await fetchImpl(TOKEN_URL, {
         method: "POST",
@@ -202,7 +231,7 @@ async function matchClientSecretFromAgy(
           grant_type: "authorization_code",
           redirect_uri: REDIRECT_URI,
         }).toString(),
-        signal,
+        signal: probeSignal,
       });
       const payload = (await res.json().catch(() => ({}))) as { error?: unknown };
       if (payload.error === "invalid_grant") {
@@ -215,81 +244,163 @@ async function matchClientSecretFromAgy(
   return null;
 }
 
-function persistOAuthClientCredentials(configFile: string, creds: OAuthClientCredentials): void {
-  const wrote = updateProviderConfig(configFile, (cfg) => {
-    cfg.oauthClientId = creds.clientId;
-    cfg.oauthClientSecret = creds.clientSecret;
-  });
-  if (wrote) {
-    try {
-      fs.chmodSync(configFile, 0o600);
-    } catch {
-      // Ignore chmod failures on unsupported filesystems.
+export interface AntigravityClientSyncResult {
+  oauth: "updated" | "unchanged" | "login-required" | "overridden" | "unavailable";
+  userAgent: "updated" | "unchanged" | "unavailable";
+}
+
+function hasStoredOAuthLogin(configFile: string): boolean {
+  const checkFailed = "Cannot read auth.json to check the current login.";
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(path.dirname(configFile), "auth.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new AntigravityAuthError(checkFailed);
+  }
+  try {
+    const auth = JSON.parse(raw);
+    if (!auth || typeof auth !== "object" || Array.isArray(auth)) throw new Error();
+    const entry = auth[PROVIDER_ID] as OAuthCredentialLike | undefined;
+    return entry?.type === "oauth" || (!entry?.type && !!(entry?.refresh || entry?.access));
+  } catch {
+    throw new AntigravityAuthError(checkFailed);
+  }
+}
+
+/** Sync local agy settings without opening a browser or touching account tokens. */
+export async function syncAntigravityClient(
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+  options?: Pick<OAuthClientOptions, "env" | "configFile" | "agyPaths">,
+): Promise<AntigravityClientSyncResult> {
+  signal?.throwIfAborted();
+  const env = options?.env ?? process.env;
+  const configFile = resolveOAuthConfigFile(options);
+  const agy = await readLocalAgy(options, signal);
+  if (!agy) throw new AntigravityAuthError("No readable local agy binary found.");
+
+  const userAgent = userAgentFromAgy(agy.bytes);
+  const overridden = !!(env.ANTIGRAVITY_CLIENT_ID?.trim() || env.ANTIGRAVITY_CLIENT_SECRET?.trim());
+  const clientId = overridden ? undefined : await detectAgyLoginClientId(agy.file, REDIRECT_URI, signal);
+  const clientSecret = clientId ? await matchClientSecretFromAgy(clientId, agy.bytes, fetchImpl, signal) : null;
+
+  signal?.throwIfAborted();
+  const config = loadProviderConfig(configFile);
+  const savedClientId = typeof config?.oauthClientId === "string" ? config.oauthClientId.trim() : undefined;
+  let oauth: AntigravityClientSyncResult["oauth"] = overridden ? "overridden" : "unavailable";
+  if (clientId && clientSecret) {
+    if (clientId !== savedClientId && hasStoredOAuthLogin(configFile)) {
+      oauth = "login-required";
+    } else {
+      oauth = clientId === config?.oauthClientId && clientSecret === config?.oauthClientSecret
+        ? "unchanged" : "updated";
     }
   }
+
+  const uaStatus = !userAgent ? "unavailable" : userAgent === config?.userAgent ? "unchanged" : "updated";
+  if (oauth === "updated" || uaStatus === "updated") {
+    const wrote = updateProviderConfig(configFile, (cfg) => {
+      if (oauth === "updated" && clientId && clientSecret) {
+        cfg.oauthClientId = clientId;
+        cfg.oauthClientSecret = clientSecret;
+      }
+      if (uaStatus === "updated") cfg.userAgent = userAgent;
+    });
+    if (!wrote) throw new AntigravityAuthError("Could not save pi-provider-antigravity.json.");
+  }
+  return { oauth, userAgent: uaStatus };
 }
 
 async function resolveOrSetupOAuthClientForLogin(
   callbacks: OAuthLoginCallbacks,
   fetchImpl: typeof fetch,
   clientOptions?: OAuthClientOptions,
-): Promise<OAuthClientCredentials> {
+): Promise<OAuthClientCredentials & { configFile: string; save: () => void }> {
   const env = clientOptions?.env ?? process.env;
-  const configFile = clientOptions?.configFile ?? defaultConfigFile(env);
+  const configFile = resolveOAuthConfigFile(clientOptions);
   const fileConfig = loadProviderConfig(configFile);
+  const explicitId = clientOptions?.clientId?.trim() || env.ANTIGRAVITY_CLIENT_ID?.trim();
+  const explicitSecret = clientOptions?.clientSecret?.trim() || env.ANTIGRAVITY_CLIENT_SECRET?.trim();
 
-  let clientId =
-    clientOptions?.clientId?.trim() ||
-    env.ANTIGRAVITY_CLIENT_ID?.trim() ||
+  let clientId = explicitId ||
     (typeof fileConfig?.oauthClientId === "string" ? fileConfig.oauthClientId.trim() : "");
+  let clientSecret = explicitSecret ||
+    (typeof fileConfig?.oauthClientSecret === "string" ? fileConfig.oauthClientSecret.trim() : "");
 
-  let clientSecret =
-    clientOptions?.clientSecret?.trim() ||
-    env.ANTIGRAVITY_CLIENT_SECRET?.trim() ||
-    (typeof fileConfig?.oauthClientSecret === "string"
-      ? fileConfig.oauthClientSecret.trim()
-      : "");
+  const agy = await readLocalAgy(clientOptions, callbacks.signal);
+  const userAgent = agy ? userAgentFromAgy(agy.bytes) : undefined;
 
+  const detectedId = agy && !explicitId && (!explicitSecret || !clientId)
+    ? await detectAgyLoginClientId(agy.file, REDIRECT_URI, callbacks.signal)
+    : undefined;
   let shouldPersist = false;
 
-  if (!clientId) {
-    const rawClientId = await callbacks.onPrompt({
-      message: "Paste Antigravity OAuth client_id (or full agy login URL):",
-    });
-    clientId = extractClientIdFromInput(rawClientId);
-    shouldPersist = true;
-  }
+  const matchSecret = async (id: string) => {
+    if (!agy) return null;
+    callbacks.onProgress?.("Checking OAuth client_secret from local agy...");
+    return matchClientSecretFromAgy(id, agy.bytes, fetchImpl, callbacks.signal);
+  };
 
-  if (!clientSecret) {
-    callbacks.onProgress?.("Detecting OAuth client_secret from local agy binary...");
-    const agyPaths = clientOptions?.agyPaths ?? resolveDefaultAgyCandidatePaths(env);
-    const extracted = await matchClientSecretFromAgy(
-      clientId,
-      agyPaths,
-      fetchImpl,
-      callbacks.signal,
-    );
-    if (extracted) {
-      clientSecret = extracted;
-      shouldPersist = true;
-    } else {
-      const rawSecret = await callbacks.onPrompt({
-        message: "Could not auto-detect client_secret from agy. Paste OAuth client_secret (GOCSPX-...):",
-      });
-      clientSecret = rawSecret.trim();
-      if (!clientSecret) {
-        throw new AntigravityAuthError(MISSING_OAUTH_CLIENT_MSG);
-      }
+  const probeId = detectedId || clientId;
+  if (probeId && !explicitSecret) {
+    const matchedSecret = await matchSecret(probeId);
+    if (matchedSecret) {
+      clientId = probeId;
+      clientSecret = matchedSecret;
       shouldPersist = true;
     }
   }
 
-  const resolved = { clientId, clientSecret };
-  if (shouldPersist) {
-    persistOAuthClientCredentials(configFile, resolved);
-    callbacks.onProgress?.(`Saved OAuth client credentials to ${path.basename(configFile)}.`);
+  // Keep a known pair intact if detection fails; never combine a new ID with a cached Secret.
+  if (!clientId || !clientSecret) {
+    if (!clientId) {
+      clientId = detectedId || extractClientIdFromInput(await callbacks.onPrompt({
+        message: "Paste Antigravity OAuth client_id (or full agy login URL):",
+      }));
+      clientSecret = explicitSecret || "";
+    } else if (detectedId && !clientSecret) {
+      clientId = detectedId;
+    }
+    if (!clientSecret) {
+      const matchedSecret = clientId !== probeId ? await matchSecret(clientId) : null;
+      clientSecret = matchedSecret || (await callbacks.onPrompt({
+        message: "Could not auto-detect client_secret from agy. Paste OAuth client_secret (GOCSPX-...):",
+      })).trim();
+    }
+    if (!clientSecret) throw new AntigravityAuthError(MISSING_OAUTH_CLIENT_MSG);
+    shouldPersist = true;
   }
-  return resolved;
+
+  return {
+    clientId,
+    clientSecret,
+    configFile,
+    save() {
+      const credentialsChanged = shouldPersist &&
+        (clientId !== fileConfig?.oauthClientId || clientSecret !== fileConfig?.oauthClientSecret);
+      const userAgentChanged = userAgent !== undefined && userAgent !== fileConfig?.userAgent;
+      if (!credentialsChanged && !userAgentChanged) return;
+
+      const wrote = updateProviderConfig(configFile, (cfg) => {
+        if (credentialsChanged) {
+          cfg.oauthClientId = clientId;
+          cfg.oauthClientSecret = clientSecret;
+        }
+        if (userAgentChanged) cfg.userAgent = userAgent;
+      });
+      if (!wrote) {
+        callbacks.onProgress?.(`Could not save Antigravity settings to ${path.basename(configFile)}.`);
+        return;
+      }
+      if (credentialsChanged) {
+        callbacks.onProgress?.(`Saved OAuth client credentials to ${path.basename(configFile)}.`);
+      }
+      if (userAgentChanged) {
+        callbacks.onProgress?.(`Saved User-Agent from local agy to ${path.basename(configFile)}.`);
+      }
+    },
+  };
 }
 
 /**
@@ -338,12 +449,13 @@ export async function fetchProjectId(
   token: string,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  configFile?: string,
 ): Promise<string> {
   try {
     const res = await fetchImpl(`${DEFAULT_ENDPOINT}/v1internal:loadCodeAssist`, {
       method: "POST",
       headers: {
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": resolveAntigravityUserAgent(configFile),
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
@@ -370,7 +482,7 @@ export async function loginAntigravity(
   fetchImpl: typeof fetch = fetch,
   clientOptions?: OAuthClientOptions,
 ): Promise<OAuthCredentials> {
-  const { clientId, clientSecret } = await resolveOrSetupOAuthClientForLogin(
+  const { clientId, clientSecret, configFile, save } = await resolveOrSetupOAuthClientForLogin(
     callbacks,
     fetchImpl,
     clientOptions,
@@ -455,8 +567,11 @@ export async function loginAntigravity(
     expires_in?: number;
   };
 
+  callbacks.signal?.throwIfAborted();
+  save();
+
   callbacks.onProgress?.("Resolving Code Assist project ID...");
-  const projectId = await fetchProjectId(tokens.access_token, callbacks.signal, fetchImpl);
+  const projectId = await fetchProjectId(tokens.access_token, callbacks.signal, fetchImpl, configFile);
 
   return {
     refresh: normalizeRefreshToken(tokens.refresh_token || ""),
@@ -515,7 +630,9 @@ export async function refreshAntigravityToken(
     }
   }
 
-  const freshProjectId = await fetchProjectId(tokens.access_token, signal, fetchImpl);
+  const freshProjectId = await fetchProjectId(
+    tokens.access_token, signal, fetchImpl, resolveOAuthConfigFile(clientOptions),
+  );
   const projectId = freshProjectId !== FALLBACK_PROJECT_ID ? freshProjectId : existingProjectId;
 
   const nextRefresh = tokens.refresh_token

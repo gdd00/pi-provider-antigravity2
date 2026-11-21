@@ -340,12 +340,17 @@ test("bootstrapCatalogFromDiskOrAuth boots cold from auth.json without mutating 
     fs.writeFileSync(authFile, initialAuthRaw, "utf-8");
     fs.writeFileSync(
       path.join(dir, "pi-provider-antigravity.json"),
-      JSON.stringify({ oauthClientId: "test-client-id", oauthClientSecret: "test-client-secret" }),
+      JSON.stringify({
+        oauthClientId: "test-client-id",
+        oauthClientSecret: "test-client-secret",
+        userAgent: "test-bootstrap/1.0",
+      }),
       "utf-8",
     );
     fs.writeFileSync(path.join(dir, "models-store.json"), "{}", "utf-8");
 
     const fetchRequests: string[] = [];
+    const cloudUserAgents: Array<string | null> = [];
     const mockFetch: typeof fetch = async (input, init) => {
       const url = String(input);
       fetchRequests.push(url);
@@ -356,6 +361,7 @@ test("bootstrapCatalogFromDiskOrAuth boots cold from auth.json without mutating 
           status: 200,
         });
       }
+      cloudUserAgents.push(new Headers(init?.headers).get("User-Agent"));
       if (url.includes("v1internal:loadCodeAssist")) {
         return new Response(JSON.stringify({ cloudaicompanionProject: "cold-proj" }), {
           status: 200,
@@ -380,6 +386,7 @@ test("bootstrapCatalogFromDiskOrAuth boots cold from auth.json without mutating 
     assert.equal(bootstrapped.fromStore, false);
     assert.ok(bootstrapped.models.some((m) => m.id === "gemini-4-hydrogen"));
     assert.equal(fetchRequests.length, 3);
+    assert.deepEqual(cloudUserAgents, ["test-bootstrap/1.0", "test-bootstrap/1.0"]);
     // auth.json must remain unmodified on disk.
     assert.equal(fs.readFileSync(authFile, "utf-8"), initialAuthRaw);
 

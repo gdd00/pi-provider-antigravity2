@@ -751,10 +751,11 @@ export function createModelCatalog(deps?: {
     }
 
     try {
+      const configFile = defaultConfigFile(process.env, agentDir);
       const resolvedCreds = await resolveOrRefreshCredentialSource(authSource, {
         signal: controller.signal,
         fetchImpl: options?.fetchImpl ?? defaultFetchImpl,
-        clientOptions: { configFile: defaultConfigFile(process.env, agentDir) },
+        clientOptions: { configFile },
       });
       if (!resolvedCreds) {
         return { models: [], fromStore: false };
@@ -762,7 +763,9 @@ export function createModelCatalog(deps?: {
 
       const effectiveClient =
         options?.client ??
-        (options?.fetchImpl ? createAntigravityClient({ fetch: options.fetchImpl }) : client);
+        (options?.fetchImpl || (options?.agentDir && !deps?.client)
+          ? createAntigravityClient({ configFile, fetch: options?.fetchImpl ?? defaultFetchImpl })
+          : client);
       const packedSource: CredentialSource = {
         apiKey: JSON.stringify({
           token: resolvedCreds.token,

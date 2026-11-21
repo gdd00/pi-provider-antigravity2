@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { extractAgyBuild, extractAgyLoginClientId } from "../pi-provider-antigravity2/agy.ts";
 import {
   AntigravityAuthError,
   extractClientIdFromInput,
@@ -13,11 +14,13 @@ import {
   loginAntigravity,
   normalizeRefreshToken,
   parseStoredCredentials,
+  REDIRECT_URI,
   refreshAntigravityToken,
   requireCredentials,
   resolveCredentials,
   resolveOAuthClientCredentials,
   resolveOrRefreshCredentialSource,
+  syncAntigravityClient,
 } from "../pi-provider-antigravity2/auth.ts";
 
 const TEST_CLIENT_OPTIONS = { clientId: "test-oauth-client-id", clientSecret: "test-oauth-client-secret" };
@@ -25,6 +28,7 @@ import {
   ANTIGRAVITY_CLI_CL,
   ANTIGRAVITY_CLI_VERSION,
   buildAntigravityUserAgent,
+  DEFAULT_USER_AGENT,
   FALLBACK_PROJECT_ID,
 } from "../pi-provider-antigravity2/constants.ts";
 import {
@@ -100,6 +104,34 @@ test("buildAntigravityHeaders and protocol client never force a manual Host head
       return true;
     },
   );
+});
+
+test("protocol requests use the configured User-Agent unless explicitly overridden", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-user-agent-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  const configUserAgent = "example-cli/1.2.3 (linux)";
+  const headers: Array<string | null> = [];
+  const mockFetch: typeof fetch = async (_url, init) => {
+    headers.push(new Headers(init?.headers).get("User-Agent"));
+    return new Response("{}");
+  };
+
+  assert.equal(createAntigravityClient({ configFile }).userAgent, DEFAULT_USER_AGENT);
+  for (const userAgent of [null, 1, "   ", "foo\r\nbar", "invalid\u0000value"]) {
+    fs.writeFileSync(configFile, JSON.stringify({ userAgent }));
+    assert.equal(createAntigravityClient({ configFile }).userAgent, DEFAULT_USER_AGENT);
+  }
+
+  fs.writeFileSync(configFile, JSON.stringify({ userAgent: ` ${configUserAgent} ` }));
+  const source = { apiKey: "test-token" };
+  await createAntigravityClient({ configFile, fetch: mockFetch }).fetchAvailableModels(source);
+  await createAntigravityClient({
+    configFile,
+    userAgent: "explicit-client/1.0",
+    fetch: mockFetch,
+  }).fetchAvailableModels(source);
+  assert.deepEqual(headers, [configUserAgent, "explicit-client/1.0"]);
 });
 
 test("normalizeRefreshToken strips accidental leading hyphens before 1//", () => {
@@ -379,14 +411,301 @@ test("extractClientIdFromInput and extractClientSecretCandidates parse login URL
   assert.deepEqual(extractClientSecretCandidates(rodata), [fakeSecretA, fakeSecretB]);
 });
 
-test("loginAntigravity auto-extracts matching secret from local agy binary and persists to pi-provider-antigravity.json", async () => {
+const agyStamp = (version: string, cl: string, marker = "LINUX") =>
+  `\0${marker}\0${version}\n\0changelist ${cl} with baseline 123 in a mint client based on //depot/google3\0`;
+
+test("extractAgyBuild ignores changelog versions and rejects ambiguous or incomplete metadata", () => {
+  const release = agyStamp("1.5.13", "1025641825");
+  assert.deepEqual(
+    extractAgyBuild(Buffer.from(`Changelog\n## 1.5.7\n${release}${release}`)),
+    { version: "1.5.13", cl: "1025641825" },
+  );
+  assert.deepEqual(extractAgyBuild(Buffer.from(agyStamp("1.5.7", "1019769835", "CORE"))), {
+    version: "1.5.7",
+    cl: "1019769835",
+  });
+  assert.equal(extractAgyBuild(Buffer.from(release + agyStamp("1.5.9", "1025641825"))), undefined);
+  assert.equal(extractAgyBuild(Buffer.from(release + agyStamp("1.5.13", "1021519450"))), undefined);
+  assert.equal(extractAgyBuild(Buffer.from("LINUX\x001.5.13\n")), undefined);
+});
+
+test("login syncs User-Agent even with existing credentials and preserves it without agy", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-login-user-agent-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  const agyFile = path.join(dir, "agy");
+  const original = {
+    oauthClientId: TEST_CLIENT_OPTIONS.clientId,
+    oauthClientSecret: TEST_CLIENT_OPTIONS.clientSecret,
+    userAgent: "older-cli/1.0",
+    states: { quota: { weeklyTo5hRatio: 6 } },
+  };
+  fs.writeFileSync(configFile, JSON.stringify(original), { mode: 0o600 });
+  fs.writeFileSync(agyFile, agyStamp("1.5.13", "1025641825"));
+
+  const userAgents: Array<string | null> = [];
+  const mockFetch: typeof fetch = async (url, init) => {
+    if (String(url) === "https://oauth2.googleapis.com/token") {
+      const body = new URLSearchParams(String(init?.body));
+      assert.equal(body.get("grant_type"), "authorization_code"); // No secret probe.
+      assert.equal(body.get("client_id"), original.oauthClientId);
+      assert.equal(body.get("client_secret"), original.oauthClientSecret);
+      return new Response(JSON.stringify({ access_token: "test-token", refresh_token: "test-refresh" }));
+    }
+    userAgents.push(new Headers(init?.headers).get("User-Agent"));
+    return new Response(JSON.stringify({ cloudaicompanionProject: "test-project" }));
+  };
+  const client = createAntigravityClient({ configFile, fetch: mockFetch });
+  assert.equal(client.userAgent, original.userAgent);
+  const login = () => loginAntigravity(
+    { onAuth() {}, async onPrompt() { return "test-code"; } },
+    mockFetch,
+    { env: {}, configFile, agyPaths: [agyFile] },
+  );
+
+  await login();
+  const expected = buildAntigravityUserAgent(process.platform, process.arch, {
+    version: "1.5.13",
+    cl: "1025641825",
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), { ...original, userAgent: expected });
+  assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+  await client.fetchAvailableModels({ apiKey: "test-token" });
+
+  fs.unlinkSync(agyFile);
+  await login();
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), { ...original, userAgent: expected });
+  assert.deepEqual(userAgents, [expected, expected, expected]);
+});
+
+const agyLoginUrl = (clientId: string, redirect = REDIRECT_URI) =>
+  "https://accounts.google.com/o/oauth2/auth?" +
+  new URLSearchParams({ client_id: clientId, redirect_uri: redirect, response_type: "code" });
+
+test("extractAgyLoginClientId ignores unrelated links and rejects ambiguous IDs", () => {
+  const id = "99999-test.apps.googleusercontent.com";
+  const unrelated = agyLoginUrl("12345-other.apps.googleusercontent.com", "http://localhost:1234/");
+  assert.equal(extractAgyLoginClientId(`Log:\n  ${unrelated}\n  ${agyLoginUrl(id)}\n`, REDIRECT_URI), id);
+  assert.equal(extractAgyLoginClientId(unrelated, REDIRECT_URI), undefined);
+  assert.equal(
+    extractAgyLoginClientId(`${agyLoginUrl(id)}\n${agyLoginUrl("12345-other.apps.googleusercontent.com")}`, REDIRECT_URI),
+    undefined,
+  );
+});
+
+test("login gets the Client ID from agy without asking the user to paste it", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-login-url-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  const agyFile = path.join(dir, "agy");
+  const clientId = "99999-detected.apps.googleusercontent.com";
+  const clientSecret = "GOCSPX-" + "2".repeat(28);
+  fs.writeFileSync(agyFile, [
+    "#!/bin/sh",
+    '[ "$*" = "acp --login --disable-telemetry" ] || exit 2',
+    '[ "$HOME" = "$PWD" ] && [ -z "$DISPLAY$BROWSER" ] || exit 2',
+    'if read -r code; then exit 2; fi',
+    `printf '%s\\n' '  ${agyLoginUrl(clientId)}'`,
+    "exit 1",
+    `# embedded strings: 12345-other.apps.googleusercontent.com ${clientSecret}`,
+    "",
+  ].join("\n"), { mode: 0o700 });
+
+  let piLoginUrl = "";
+  const result = await loginAntigravity({
+    onAuth({ url }) { piLoginUrl = url; },
+    async onPrompt({ message }) {
+      assert.equal(message, "Paste authorization code from browser:");
+      return "test-code";
+    },
+  }, async (input, init) => {
+    if (String(input) !== "https://oauth2.googleapis.com/token") {
+      return new Response(JSON.stringify({ cloudaicompanionProject: "test-project" }));
+    }
+    const body = new URLSearchParams(String(init?.body));
+    assert.equal(body.get("client_id"), clientId);
+    assert.equal(body.get("client_secret"), clientSecret);
+    if (body.get("code") === "probe") {
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }
+    assert.equal(body.get("code"), "test-code");
+    return new Response(JSON.stringify({ access_token: "test-token", refresh_token: "test-refresh" }));
+  }, { env: {}, configFile, agyPaths: [agyFile] });
+
+  assert.equal(new URL(piLoginUrl).searchParams.get("client_id"), clientId);
+  assert.equal(result.refresh, "test-refresh");
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, "utf8")), {
+    oauthClientId: clientId,
+    oauthClientSecret: clientSecret,
+  });
+});
+
+test("each login re-reads agy and replaces a saved pair only after token exchange", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-repeat-login-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  const agyFile = path.join(dir, "agy");
+  const oldId = "11111-old.apps.googleusercontent.com";
+  const newId = "22222-new.apps.googleusercontent.com";
+  const nextId = "33333-next.apps.googleusercontent.com";
+  const oldSecret = "GOCSPX-" + "1".repeat(28);
+  const newSecret = "GOCSPX-" + "2".repeat(28);
+  const nextSecret = "GOCSPX-" + "3".repeat(28);
+  const old = { oauthClientId: oldId, oauthClientSecret: oldSecret, userAgent: "previous" };
+  fs.writeFileSync(configFile, JSON.stringify(old), { mode: 0o600 });
+  const readConfig = () => JSON.parse(fs.readFileSync(configFile, "utf-8"));
+  const stageAgy = (id: string, secret: string, version: string, cl: string) => {
+    fs.writeFileSync(agyFile, [
+      "#!/bin/sh",
+      `printf '%s\\n' '${agyLoginUrl(id)}'`,
+      "exit 1",
+      `# ${secret}`,
+      `# ${agyStamp(version, cl)}`,
+    ].join("\n"), { mode: 0o700 });
+  };
+
+  let probes = 0;
+  const login = (
+    expectedId: string,
+    expectedSecret: string,
+    { match = true, fail = false } = {},
+  ) => loginAntigravity({
+    onAuth({ url }) { assert.equal(new URL(url).searchParams.get("client_id"), expectedId); },
+    async onPrompt({ message }) {
+      assert.equal(message, "Paste authorization code from browser:");
+      return "test-code";
+    },
+  }, async (input, init) => {
+    if (String(input) !== "https://oauth2.googleapis.com/token") {
+      return Response.json({ cloudaicompanionProject: "test-project" });
+    }
+    const body = new URLSearchParams(String(init?.body));
+    if (body.get("code") === "probe") {
+      probes++;
+      return Response.json({ error: match ? "invalid_grant" : "invalid_client" }, { status: 400 });
+    }
+    assert.equal(body.get("client_id"), expectedId);
+    assert.equal(body.get("client_secret"), expectedSecret);
+    return fail
+      ? Response.json({ error: "invalid_grant" }, { status: 400 })
+      : Response.json({ access_token: "test-token", refresh_token: "test-refresh" });
+  }, { env: {}, configFile, agyPaths: [agyFile] });
+
+  stageAgy(newId, newSecret, "1.5.13", "1025641825");
+  await assert.rejects(login(newId, newSecret, { fail: true }), /Failed to exchange token/);
+  assert.deepEqual(readConfig(), old);
+
+  await login(newId, newSecret);
+  const updated = readConfig();
+  assert.equal(updated.oauthClientId, newId);
+  assert.equal(updated.oauthClientSecret, newSecret);
+  assert.match(updated.userAgent, /antigravity\/cli\/1\.5\.13 .*cl=1025641825/);
+
+  stageAgy(nextId, nextSecret, "1.5.14", "1025641826");
+  await login(newId, newSecret, { match: false });
+  assert.equal(readConfig().oauthClientId, newId);
+  assert.equal(readConfig().oauthClientSecret, newSecret);
+  assert.match(readConfig().userAgent, /antigravity\/cli\/1\.5\.14 .*cl=1025641826/);
+
+  await login(nextId, nextSecret);
+  assert.equal(readConfig().oauthClientId, nextId);
+  assert.equal(readConfig().oauthClientSecret, nextSecret);
+  assert.equal(probes, 4);
+});
+
+test("sync-client updates local agy settings but protects an existing login if the ID changes", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-sync-client-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  const authFile = path.join(dir, "auth.json");
+  const agyFile = path.join(dir, "agy");
+  const clientId = "11111-current.apps.googleusercontent.com";
+  const newId = "22222-new.apps.googleusercontent.com";
+  const secret = "GOCSPX-" + "A".repeat(28);
+  const newSecret = "GOCSPX-" + "B".repeat(28);
+  const states = { quota: { weeklyTo5hRatio: 6 } };
+  const auth = JSON.stringify({ antigravity: { type: "oauth", refresh: "saved-token" } });
+  fs.writeFileSync(authFile, auth);
+  fs.writeFileSync(configFile, JSON.stringify({
+    oauthClientId: clientId, oauthClientSecret: "previous-secret", states,
+  }));
+  const readConfig = () => JSON.parse(fs.readFileSync(configFile, "utf8"));
+  const readAuth = () => fs.readFileSync(authFile, "utf8");
+  const stageAgy = (id: string, clientSecret: string, version: string, cl: string) => {
+    fs.writeFileSync(agyFile, [
+      "#!/bin/sh",
+      "printf '%s\\n' '" + agyLoginUrl(id) + "'",
+      "exit 1",
+      "# " + clientSecret,
+      "# " + agyStamp(version, cl),
+    ].join("\n"), { mode: 0o700 });
+  };
+
+  const probes: URLSearchParams[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "https://oauth2.googleapis.com/token");
+    probes.push(new URLSearchParams(String(init?.body)));
+    return Response.json({ error: "invalid_grant" }, { status: 400 });
+  };
+  const sync = (env = {}) => syncAntigravityClient(undefined, fetchImpl, {
+    env, configFile, agyPaths: [agyFile],
+  });
+
+  stageAgy(clientId, secret, "1.5.13", "1025641825");
+  assert.deepEqual(await sync(), { oauth: "updated", userAgent: "updated" });
+  assert.equal(readConfig().oauthClientSecret, secret);
+  assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+
+  stageAgy(newId, newSecret, "1.5.14", "1025641826");
+  assert.deepEqual(await sync(), { oauth: "login-required", userAgent: "updated" });
+  assert.equal(readConfig().oauthClientId, clientId);
+  assert.equal(readConfig().oauthClientSecret, secret);
+  assert.match(readConfig().userAgent, /antigravity\/cli\/1\.5\.14 .*cl=1025641826/);
+  assert.equal(readAuth(), auth);
+
+  fs.unlinkSync(authFile);
+  assert.deepEqual(await sync(), { oauth: "updated", userAgent: "unchanged" });
+  assert.deepEqual(await sync(), { oauth: "unchanged", userAgent: "unchanged" });
+  assert.equal(readConfig().oauthClientId, newId);
+  assert.equal(readConfig().oauthClientSecret, newSecret);
+  assert.deepEqual(readConfig().states, states);
+  assert.equal(fs.existsSync(authFile), false);
+
+  assert.deepEqual(await sync({ ANTIGRAVITY_CLIENT_ID: "override" }), {
+    oauth: "overridden", userAgent: "unchanged",
+  });
+  assert.deepEqual(probes.map((p) => [
+    p.get("grant_type"), p.get("code"), p.get("client_id"), p.get("client_secret"),
+  ]), [
+    ["authorization_code", "probe", clientId, secret],
+    ...Array.from({ length: 3 }, () => ["authorization_code", "probe", newId, newSecret]),
+  ]);
+});
+
+test("sync-client reports a missing agy without creating config", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-sync-no-agy-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, "pi-provider-antigravity.json");
+  await assert.rejects(syncAntigravityClient(undefined, undefined, {
+    env: {}, configFile, agyPaths: [],
+  }), /No readable local agy binary found/);
+  assert.equal(fs.existsSync(configFile), false);
+});
+
+test("login falls back to a pasted URL when agy cannot produce one and persists the matching Secret", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ag2-login-agy-"));
   try {
     const configFile = path.join(dir, "pi-provider-antigravity.json");
     const agyFile = path.join(dir, "agy");
     fs.writeFileSync(
       configFile,
-      JSON.stringify({ states: { quota: { weeklyTo5hRatio: 6 } } }),
+      JSON.stringify({ userAgent: "test-login/1.0", states: { quota: { weeklyTo5hRatio: 6 } } }),
       "utf-8",
     );
 
@@ -399,6 +718,7 @@ test("loginAntigravity auto-extracts matching secret from local agy binary and p
 
     const prompts: string[] = [];
     let authUrl = "";
+    let loadCodeAssistUserAgent: string | null = null;
     const creds = await loginAntigravity(
       {
         onAuth({ url }) {
@@ -429,6 +749,7 @@ test("loginAntigravity auto-extracts matching secret from local agy binary and p
             { status: 200 },
           );
         }
+        loadCodeAssistUserAgent = new Headers(init?.headers).get("User-Agent");
         return new Response(JSON.stringify({ cloudaicompanionProject: "auto-proj" }), { status: 200 });
       },
       { env: {}, configFile, agyPaths: [agyFile] },
@@ -438,8 +759,10 @@ test("loginAntigravity auto-extracts matching secret from local agy binary and p
     assert.match(authUrl, /client_id=99999-test\.apps\.googleusercontent\.com/);
 
     assert.equal(creds.refresh, "1//03_auto_rt");
+    assert.equal(loadCodeAssistUserAgent, "test-login/1.0");
 
     const persisted = JSON.parse(fs.readFileSync(configFile, "utf-8"));
+    assert.equal(persisted.userAgent, "test-login/1.0");
     assert.equal(persisted.oauthClientId, "99999-test.apps.googleusercontent.com");
     assert.equal(persisted.oauthClientSecret, rightSecret);
     assert.deepEqual(persisted.states, { quota: { weeklyTo5hRatio: 6 } });
