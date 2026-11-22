@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1] - 2026-11-22
+
+- Fetch the Antigravity model catalog only via `/antigravity models` or `/antigravity refresh`. Startup and Pi's model selectors use the local cache; selecting a model does not fetch quota.
+
 ## [0.2.0] - 2026-11-22
 
 - Disconnect Antigravity after 90 seconds idle. Stop background requests, show AFK status above the Pi editor, and resume on the next prompt or provider command.

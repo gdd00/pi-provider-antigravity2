@@ -93,8 +93,7 @@
 3. **Refresh Token 容错规范化**：自动清理 Refresh Token 中误带的前导连字符（如 `-1//...` 规范化为 `1//...`）及多余空白。
 4. **无感刷新与 401 恢复**：
    - 将 `{ token, projectId }` 打包保存在凭据的 `access` 中，并在每次请求/刷新时自动继承已知的 `projectId`。
-   - 冷启动或流式对话遇到 `401` 时自动触发单次 Token 刷新恢复并重试。
-   - 支持纯无头冷启动：从 `~/.pi/agent/models-store.json` 或 `~/.pi/agent/auth.json` 预引导模型目录，避免离线或首次启动时报 `Unknown provider "antigravity"`。
+   - 流式对话遇到 `401` 时可自动刷新一次 Token 并重试。
 
 ---
 
@@ -172,11 +171,15 @@ pi -e /path/to/repo
 # 或：ln -s /path/to/repo/pi-provider-antigravity2 ~/.pi/agent/extensions/pi-provider-antigravity2
 ```
 
-登录账号后选择 `antigravity` 模型即可使用：
+登录后，先拉取模型列表，再选择 `antigravity` 模型：
 
 ```text
 /login antigravity
+/antigravity refresh
+/model
 ```
+
+只有 `/antigravity models` 和 `/antigravity refresh` 会联网拉取 Antigravity 模型目录。启动、`/model` 和 `/scoped-models` 都使用已保存的目录。首次无头部署时，先在交互会话中刷新一次，或将已有的 `pi-provider-antigravity-models.json` 复制到 Pi 的 agent 目录。旧版 Pi `models-store.json` 里的缓存仍可作为回退。
 
 #### 🪪 使用 Refresh Token（RT）免浏览器登录（`auth.json`）
 
@@ -195,7 +198,7 @@ pi -e /path/to/repo
 
 - `type`：固定为 `"oauth"`。
 - `refresh`：填入你的 Refresh Token（`1//...`；即使不小心多粘了前导连字符 `-1//...`，扩展也会自动清理）。
-- `access` 与 `expires`：保持 `""` 和 `0` 即可。下次启动 Pi（或首次刷新模型/发起对话）时，扩展会自动用 `refresh` 换取 `access_token` 并解析 `projectId`。
+- `access` 与 `expires`：保持 `""` 和 `0` 即可。请求需要凭据时，Pi 会用 `refresh` 换取 `access_token`，扩展会自动解析 `projectId`。
 - 建议将权限收紧为仅当前用户可读：`chmod 600 ~/.pi/agent/auth.json`。
 
 ### 空闲断连
@@ -205,8 +208,8 @@ pi -e /path/to/repo
 ### 💬 内置命令与工具
 
 - **`/antigravity usage`**：查看当前 5 小时与每周配额池进度条及重置时间
-- **`/antigravity models`**：查看推荐/可用模型、上下文窗口与剩余配额
-- **`/antigravity refresh`**：强制刷新最新模型目录
+- **`/antigravity models`**：刷新并显示推荐/可用模型、上下文窗口与剩余配额
+- **`/antigravity refresh`**：刷新同一份模型目录，不打印列表
 - **`/antigravity sync-client`**：从本机 `agy` 同步 OAuth Client ID、Secret 和 User-Agent，已登录且 Client ID 变化时，只更新 User-Agent，保留原 OAuth 凭据；执行 `/login antigravity` 切换。
 - **`/antigravity settings`**：交互式配置界面（写入 `~/.pi/agent/pi-provider-antigravity.json`）：
   - `Quota footer`（`"off"` / `"smart"` / `"all"`）：底部状态栏配额显示模式

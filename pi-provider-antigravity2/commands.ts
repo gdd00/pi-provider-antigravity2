@@ -7,7 +7,7 @@ import {
 } from "./auth.ts";
 import { notifyCommandOutput, openSettings, type SettingsUiDeps } from "./config.ts";
 import type { ModelCatalog } from "./model-catalog.ts";
-import { type AntigravityClient, PROVIDER_ID } from "./protocol.ts";
+import type { AntigravityClient } from "./protocol.ts";
 import { createQuotaStatus, type QuotaStatus } from "./quota-status.ts";
 import { executeWebSearchCommand } from "./search.ts";
 import { createQuotaFooterField, createUnsignedToolCallsField } from "./settings.ts";
@@ -21,6 +21,7 @@ export interface SubcommandCompletion {
 export interface AntigravityCommandsDeps {
   quotaStatus?: QuotaStatus;
   catalog: ModelCatalog;
+  refreshModels(ctx: ExtensionCommandContext): Promise<void>;
   client?: AntigravityClient;
   syncClient?: typeof syncAntigravityClient;
   uiDeps?: SettingsUiDeps;
@@ -31,13 +32,8 @@ export interface AntigravityCommands {
   complete(prefix: string): SubcommandCompletion[] | null;
 }
 
-interface SubcommandContext {
+interface SubcommandContext extends AntigravityCommandsDeps {
   ctx: ExtensionCommandContext;
-  quotaStatus?: QuotaStatus;
-  catalog: ModelCatalog;
-  client?: AntigravityClient;
-  syncClient?: typeof syncAntigravityClient;
-  uiDeps?: SettingsUiDeps;
   subArgs?: string;
 }
 
@@ -48,28 +44,24 @@ interface SubcommandDef {
   run: (deps: SubcommandContext) => Promise<void> | void;
 }
 
-async function runModelsSubcommand(
-  ctx: ExtensionCommandContext,
-  catalog: ModelCatalog,
+async function runCatalogSubcommand(
+  { ctx, catalog, refreshModels }: SubcommandContext,
+  showList: boolean,
 ): Promise<void> {
-  if ((await resolveCredentials(ctx)) === null) {
-    notifyCommandOutput(ctx, NOT_LOGGED_IN, "warning");
-    return;
-  }
   try {
-    if (ctx.hasUI) ctx.ui.notify("Fetching available models…", "info");
-    const { status, catalog: items } = await catalog.refreshGeneration(() =>
-      ctx.modelRegistry?.refresh?.({ force: true, providers: [PROVIDER_ID], signal: ctx.signal }),
-    );
-    if (status === "failed" || !items) {
-      throw new Error("no models were returned");
+    if (ctx.hasUI) ctx.ui.notify("Refreshing models…", "info");
+    await refreshModels(ctx);
+    notifyCommandOutput(ctx, showList ? catalog.formatList() : "Antigravity models refreshed successfully.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (showList && catalog.generation().items) {
+      notifyCommandOutput(ctx, `Failed to refresh models: ${message} Showing last known list.`, "warning");
+      notifyCommandOutput(ctx, catalog.formatList());
+    } else if (error instanceof AntigravityAuthError) {
+      notifyCommandOutput(ctx, message, "warning");
+    } else {
+      notifyCommandOutput(ctx, `Failed to refresh models: ${message}`, "error");
     }
-    if (status === "stale") {
-      notifyCommandOutput(ctx, "Failed to refresh models; showing last known list.", "warning");
-    }
-    notifyCommandOutput(ctx, catalog.formatList());
-  } catch (err: any) {
-    notifyCommandOutput(ctx, `Failed to fetch models: ${err?.message ?? String(err)}`, "error");
   }
 }
 
@@ -91,27 +83,6 @@ async function runUsageSubcommand(
     notifyCommandOutput(ctx, text);
   } catch (err: any) {
     notifyCommandOutput(ctx, `Failed to fetch usage: ${err?.message ?? String(err)}`, "error");
-  }
-}
-
-async function runRefreshSubcommand(
-  ctx: ExtensionCommandContext,
-  catalog: ModelCatalog,
-): Promise<void> {
-  try {
-    if (ctx.hasUI) ctx.ui.notify("Refreshing models…", "info");
-    const { status } = await catalog.refreshGeneration(() =>
-      ctx.modelRegistry?.refresh?.({ force: true, providers: [PROVIDER_ID], signal: ctx.signal }),
-    );
-    if (status === "fresh") {
-      notifyCommandOutput(ctx, "Antigravity models refreshed successfully.");
-    } else if (status === "stale") {
-      notifyCommandOutput(ctx, "Failed to refresh models; keeping last known list.", "warning");
-    } else {
-      notifyCommandOutput(ctx, "Failed to refresh models: no models were returned.", "error");
-    }
-  } catch (err: any) {
-    notifyCommandOutput(ctx, `Failed to refresh: ${err?.message ?? String(err)}`, "error");
   }
 }
 
@@ -160,14 +131,13 @@ const SUBCOMMANDS: readonly SubcommandDef[] = Object.freeze([
   },
   {
     name: "models",
-    description: "List recommended models with context window and remaining quota",
-    aliases: Object.freeze(["model"]),
-    run: ({ ctx, catalog }) => runModelsSubcommand(ctx, catalog),
+    description: "Refresh and list recommended models with context window and remaining quota",
+    run: (deps) => runCatalogSubcommand(deps, true),
   },
   {
     name: "refresh",
     description: "Fetch the latest model list",
-    run: ({ ctx, catalog }) => runRefreshSubcommand(ctx, catalog),
+    run: (deps) => runCatalogSubcommand(deps, false),
   },
   {
     name: "sync-client",
@@ -230,12 +200,8 @@ export function createAntigravityCommands(deps: AntigravityCommandsDeps): Antigr
       const cmd = SUBCOMMANDS.find((c) => c.name === sub);
       if (cmd) {
         await cmd.run({
+          ...deps,
           ctx,
-          quotaStatus: deps.quotaStatus,
-          catalog: deps.catalog,
-          client: deps.client,
-          syncClient: deps.syncClient,
-          uiDeps: deps.uiDeps,
           subArgs,
         });
         return;

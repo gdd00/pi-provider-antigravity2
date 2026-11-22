@@ -454,8 +454,9 @@ export class QuotaStatusCoordinator implements QuotaStatus {
     const update = (ctx: QuotaStatusCtx) =>
       allowRefresh() ? this.refreshAndPaint(ctx) : this.paint(ctx);
     pi.on("session_start", (_event, ctx) => update(ctx));
-    pi.on("model_select", async (event, ctx) => {
-      await update({
+    // Selecting a model updates the display only; it must not start a request.
+    pi.on("model_select", (event, ctx) => {
+      this.paint({
         ui: ctx.ui,
         modelRegistry: ctx.modelRegistry,
         model: event.model || ctx.model,

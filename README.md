@@ -93,8 +93,7 @@ Every time you run `/login antigravity`:
 3. **Refresh Token Normalization**: Automatically strips accidental leading hyphens (such as `-1//...` → `1//...`) and extra whitespace from refresh tokens.
 4. **Seamless Refresh & 401 Recovery**:
    - Packs `{ token, projectId }` into the stored `access` field and preserves known non-fallback `projectId` values across refreshes.
-   - Automatically triggers a single token refresh and retry on HTTP `401` during cold start or streaming.
-   - Headless cold-start support: bootstraps the model catalog from `~/.pi/agent/models-store.json` or `~/.pi/agent/auth.json` so offline or first-time launches never fail with `Unknown provider "antigravity"`.
+   - During streaming, HTTP `401` can trigger a single token refresh and retry.
 
 ---
 
@@ -172,11 +171,15 @@ pi -e /path/to/repo
 # or: ln -s /path/to/repo/pi-provider-antigravity2 ~/.pi/agent/extensions/pi-provider-antigravity2
 ```
 
-Log in and select an `antigravity` model:
+Log in, fetch the model list, then select an `antigravity` model:
 
 ```text
 /login antigravity
+/antigravity refresh
+/model
 ```
+
+Only `/antigravity models` and `/antigravity refresh` fetch the Antigravity catalog. Startup, `/model`, and `/scoped-models` use the last saved list. For a new headless installation, seed the cache with one of those commands in an interactive session or copy `pi-provider-antigravity-models.json` into the agent directory. Existing entries in Pi's `models-store.json` still work as a fallback.
 
 #### 🪪 Headless Login with a Refresh Token (`auth.json`)
 
@@ -195,7 +198,7 @@ If you already have a Google OAuth refresh token (for headless servers, containe
 
 - `type`: Must be `"oauth"`.
 - `refresh`: Your Google OAuth refresh token (`1//...`; accidental leading `-1//...` prefixes are automatically normalized).
-- `access` & `expires`: Leave as `""` and `0`. On the next Pi startup (or first model refresh / prompt), the extension exchanges `refresh` for an `access_token` and resolves `projectId` automatically.
+- `access` & `expires`: Leave as `""` and `0`. When a request needs credentials, Pi exchanges `refresh` for an `access_token` and the extension resolves `projectId` automatically.
 - Restrict file permissions to owner-only: `chmod 600 ~/.pi/agent/auth.json`.
 
 ### Idle disconnect
@@ -205,8 +208,8 @@ After 90 seconds idle at startup or after an agent run settles (including errors
 ### 💬 Built-in Commands & Tool
 
 - **`/antigravity usage`**: Show remaining 5h & weekly quota bars and reset timers
-- **`/antigravity models`**: List recommended/available models with context window and remaining quota
-- **`/antigravity refresh`**: Force-refresh the model catalog
+- **`/antigravity models`**: Refresh and display recommended/available models with context window and remaining quota
+- **`/antigravity refresh`**: Refresh the same catalog without displaying the list
 - **`/antigravity sync-client`**: Sync OAuth Client ID, Secret, and User-Agent from local `agy`. If the Client ID changed and Pi is already logged in, the command can update the User-Agent but keeps the existing OAuth pair; run `/login antigravity` to switch.
 - **`/antigravity settings`**: Interactive settings dialog (persisted to `~/.pi/agent/pi-provider-antigravity.json`):
   - `Quota footer` (`"off"` / `"smart"` / `"all"`): Status footer quota display mode

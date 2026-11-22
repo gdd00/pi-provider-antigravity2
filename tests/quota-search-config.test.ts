@@ -168,6 +168,37 @@ test("quota-status parses, formats, calibrates 5h/weekly ratio, and renders smar
   }
 });
 
+test("selecting Antigravity only paints the quota footer; agent settlement can refresh it", async () => {
+  const listeners = new Map<string, (...args: any[]) => unknown>();
+  let paints = 0;
+  let fetches = 0;
+  const qs = createQuotaStatus({
+    store: {
+      loadMode: () => "smart",
+      loadQuotaState: () => undefined,
+      saveQuotaState: () => true,
+    },
+    fetchQuotaSummary: async () => {
+      fetches++;
+      return { groups: [] };
+    },
+  });
+  qs.bind({
+    on: (name: string, listener: (...args: any[]) => unknown) => listeners.set(name, listener),
+  } as any);
+  const model = { provider: "antigravity", id: "gemini-4-hydrogen" };
+  const ctx = {
+    ui: { setStatus: () => paints++ },
+    model,
+    modelRegistry: { getApiKeyForProvider: async () => "test-token" },
+  };
+  await listeners.get("model_select")!({ model }, ctx);
+  assert.equal(paints, 1);
+  assert.equal(fetches, 0);
+  await listeners.get("agent_settled")!({}, ctx);
+  assert.equal(fetches, 1);
+});
+
 test("search module formats grounding citations and queries v1internal:generateContent directly", async () => {
   const formatted = formatSearchResults(
     "Pi extensions use registerProvider. Tests use node.",
@@ -263,7 +294,11 @@ test("search module formats grounding citations and queries v1internal:generateC
   assert.deepEqual(toolResult.details.sources, res.sources);
 
   catalog.record({ webSearchModelIds: ["gemini-search-updated"] });
-  const cmds = createAntigravityCommands({ client: mockClient, catalog });
+  const cmds = createAntigravityCommands({
+    client: mockClient,
+    catalog,
+    refreshModels: async () => assert.fail("websearch must not refresh the model catalog"),
+  });
   await cmds.handle("websearch node test runner", ctx as any);
   assert.equal(capturedBody.model, "gemini-search-updated");
 });
@@ -358,9 +393,14 @@ test("commands module completes subcommands and routes usage, models, sync-clien
 
   const signal = new AbortController().signal;
   let syncs = 0;
+  let refreshes = 0;
   const cmds = createAntigravityCommands({
     quotaStatus,
     catalog,
+    async refreshModels(ctx) {
+      assert.equal(ctx.signal, signal);
+      refreshes++;
+    },
     async syncClient(commandSignal) {
       assert.equal(commandSignal, signal);
       syncs++;
@@ -389,12 +429,18 @@ test("commands module completes subcommands and routes usage, models, sync-clien
     },
     modelRegistry: {
       getApiKeyForProvider: async () => JSON.stringify({ token: "ya29.ok", projectId: "proj-1" }),
-      refresh: async () => true,
+      refresh: async () => assert.fail("commands must not use Pi's automatic refresh path"),
     },
   };
 
   await cmds.handle("usage", ctx);
-  await cmds.handle("model", ctx);
+  await cmds.handle("model", ctx); // Not an alias for a network refresh.
+  assert.equal(refreshes, 0);
+  await cmds.handle("models", ctx);
+  await cmds.handle("refresh", ctx);
+  assert.equal(refreshes, 2);
+  assert.equal(notifications.filter(({ text }) => /Gemini 4 Hydrogen/.test(text)).length, 1);
+  assert.equal(notifications.at(-1)?.text, "Antigravity models refreshed successfully.");
   await cmds.handle("sync-client", ctx);
   assert.equal(syncs, 1);
   assert.ok(notifications.some(({ level, text }) =>

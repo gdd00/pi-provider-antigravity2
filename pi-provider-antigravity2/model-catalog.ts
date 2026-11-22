@@ -1,29 +1,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-  AnyModel,
-  Model,
-  RefreshModelsContext,
-  ThinkingLevel,
-  ThinkingLevelMap,
-} from "@earendil-works/pi-ai";
-import {
-  type CredentialSource,
-  type OAuthCredentialLike,
-  resolveOrRefreshCredentialSource,
-} from "./auth.ts";
-import { defaultConfigFile, getAgentDir } from "./config.ts";
+import type { Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { CredentialSource } from "./auth.ts";
+import { getAgentDir, writeJsonAtomically } from "./config.ts";
 import { PROVIDER_API } from "./constants.ts";
 import { getModelProfile } from "./model-identity.ts";
 import {
   type AntigravityClient,
-  createAntigravityClient,
   DEFAULT_ENDPOINT,
   defaultAntigravityClient,
   PROVIDER_ID,
 } from "./protocol.ts";
 
 export const PRIVATE_SNAPSHOT_KEY = "pi-provider-antigravity";
+export const MODEL_CACHE_FILE = "pi-provider-antigravity-models.json";
 
 /**
  * Tier suffixes matching Pi ThinkingLevel names (low, medium, high, xhigh, max).
@@ -50,21 +40,6 @@ const CATALOG_LEVEL_NAMES: Record<number, string> = {
  */
 export function extractBaseModelId(runtimeId: string): string {
   return runtimeId.replace(TIER_SUFFIX_PATTERN, "");
-}
-
-type StoreEntry = NonNullable<RefreshModelsContext["stored"]>;
-
-export type RefreshContext = Omit<RefreshModelsContext, "stored" | "publish"> & {
-  stored?: Readonly<StoreEntry> & { [PRIVATE_SNAPSHOT_KEY]?: PersistedSnapshot };
-  publish?(publication: {
-    persist?: (StoreEntry & { [PRIVATE_SNAPSHOT_KEY]?: PersistedSnapshot }) | null;
-    update?: () => void;
-  }): Promise<boolean>;
-};
-
-export interface CatalogRefreshOutcome {
-  status: "fresh" | "stale" | "failed";
-  catalog?: AvailableModelsCatalog;
 }
 
 export interface AvailableModelItem {
@@ -126,28 +101,13 @@ export interface ModelPlan {
   isClaude: boolean;
 }
 
-export interface BootstrapCatalogOptions {
-  agentDir?: string;
-  client?: AntigravityClient;
-  offline?: boolean;
-  signal?: AbortSignal;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}
-
-export interface BootstrapCatalogResult {
-  models: Array<AnyModel>;
-  fromStore: boolean;
-}
-
 export interface ModelCatalog {
   generation(): CatalogGeneration;
   record(catalogOrRaw: unknown): void;
   restore(persistedOrSnapshot: unknown): void;
   toPersisted(): PersistedSnapshot | undefined;
-  refresh(context: RefreshContext): Promise<Array<AnyModel>>;
-  bootstrapFromDiskOrAuth(options?: BootstrapCatalogOptions): Promise<BootstrapCatalogResult>;
-  refreshGeneration(doRefresh: () => unknown): Promise<CatalogRefreshOutcome>;
+  loadCachedModels(): Array<Model<any>>;
+  refresh(source: CredentialSource, signal?: AbortSignal): Promise<Array<Model<any>>>;
   getWebSearchModelId(): string | undefined;
   resolvePlan(publicModelId: string, effort?: string): ModelPlan;
   formatList(): string;
@@ -554,8 +514,6 @@ export function formatModelsList(catalog: AvailableModelsCatalog): string {
   return lines.join("\n");
 }
 
-const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 10_000;
-
 function readJsonFileSafe(filePath: string): any | undefined {
   try {
     const raw = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
@@ -571,29 +529,17 @@ function hasUsableSnapshot(snapshot?: CatalogSnapshot): snapshot is CatalogSnaps
   );
 }
 
-function resolveAuthEntryToSource(entry: unknown): CredentialSource {
-  if (!entry) return undefined;
-  if (typeof entry === "string") return entry;
-  if (typeof entry !== "object" || Array.isArray(entry)) return undefined;
-  const record = entry as Record<string, unknown>;
-  if (record.type === "api_key" && typeof record.key === "string") {
-    return { apiKey: record.key };
-  }
-  return { credential: entry as OAuthCredentialLike };
-}
-
 /**
  * Creates a stateful ModelCatalog managing catalog refresh, snapshot persistence,
  * cold-start bootstrap, plan resolution, and CLI formatting.
  */
 export function createModelCatalog(deps?: {
   client?: AntigravityClient;
-  fetchImpl?: typeof fetch;
+  agentDir?: string;
 }): ModelCatalog {
-  const client =
-    deps?.client ??
-    (deps?.fetchImpl ? createAntigravityClient({ fetch: deps.fetchImpl }) : defaultAntigravityClient);
-  const defaultFetchImpl = deps?.fetchImpl;
+  const client = deps?.client ?? defaultAntigravityClient;
+  const agentDir = deps?.agentDir ?? getAgentDir();
+  const cacheFile = path.join(agentDir, MODEL_CACHE_FILE);
   let generation: CatalogGeneration = { snapshot: EMPTY_SNAPSHOT(), version: 0 };
 
   const record = (catalogOrRaw: unknown) => {
@@ -644,155 +590,33 @@ export function createModelCatalog(deps?: {
     return toPersistedSnapshot(snapshot);
   };
 
-  const buildPersistPayload = (models: Array<AnyModel>) => ({
-    models,
-    checkedAt: Date.now(),
-    [PRIVATE_SNAPSHOT_KEY]: toPersisted(),
-  });
-
-  const refresh = async (context: RefreshContext): Promise<Array<AnyModel>> => {
-    const persisted = context.stored?.[PRIVATE_SNAPSHOT_KEY];
-    if (persisted) restore(persisted);
-
-    const storedModels = (): Array<AnyModel> => [...(context.stored?.models ?? [])];
-    if (!context.allowNetwork) {
-      const existingStored = storedModels();
-      if (existingStored.length > 0) {
-        return existingStored;
-      }
-      if (generation.items) {
-        const bootstrappedModels = buildDynamicPublicModels(generation.items);
-        if (bootstrappedModels.length > 0 && context.publish) {
-          try {
-            await context.publish({ persist: buildPersistPayload(bootstrappedModels) });
-          } catch {
-            // Persistence during offline startup refresh is best-effort.
-          }
-        }
-        return bootstrappedModels;
-      }
-      return existingStored;
-    }
-
-    try {
-      const resolvedCreds = await resolveOrRefreshCredentialSource(
-        context as CredentialSource,
-        {
-          signal: context.signal,
-          fetchImpl: defaultFetchImpl,
-        },
-      );
-      const fetchSource: CredentialSource = resolvedCreds
-        ? {
-            apiKey: JSON.stringify({
-              token: resolvedCreds.token,
-              projectId: resolvedCreds.projectId,
-            }),
-          }
-        : (context as CredentialSource);
-
-      const json = await client.fetchAvailableModels(fetchSource, context.signal);
-      const catalog = parseAvailableModels(json);
-      record(catalog);
-
-      const dynamicModels = buildDynamicPublicModels(catalog);
-
-      if (context.publish) {
-        await context.publish({ persist: buildPersistPayload(dynamicModels) });
-      }
-
-      return dynamicModels;
-    } catch {
-      return storedModels();
-    }
+  const loadCachedModels = (): Array<Model<any>> => {
+    const cached = readJsonFileSafe(cacheFile);
+    const legacy = () => readJsonFileSafe(path.join(agentDir, "models-store.json"))?.[PROVIDER_ID];
+    const usable = (entry: any): boolean =>
+      Array.isArray(entry?.models) && entry.models.length > 0 &&
+      hasUsableSnapshot(fromPersistedSnapshot(entry[PRIVATE_SNAPSHOT_KEY]));
+    const entry = usable(cached) ? cached : legacy();
+    if (!usable(entry)) return [];
+    restore(entry[PRIVATE_SNAPSHOT_KEY]);
+    return entry.models;
   };
 
-  const bootstrapFromDiskOrAuth = async (
-    options?: BootstrapCatalogOptions,
-  ): Promise<BootstrapCatalogResult> => {
-    const agentDir = options?.agentDir || getAgentDir();
-    const storeJson = readJsonFileSafe(path.join(agentDir, "models-store.json"));
-    const storeEntry = storeJson?.[PROVIDER_ID];
-    const storeModels = Array.isArray(storeEntry?.models) ? storeEntry.models : undefined;
-    const rawSnapshot = storeEntry?.[PRIVATE_SNAPSHOT_KEY];
-    const parsedSnapshot = fromPersistedSnapshot(rawSnapshot);
-
-    if (storeModels && storeModels.length > 0 && hasUsableSnapshot(parsedSnapshot)) {
-      restore(rawSnapshot);
-      return { models: [...storeModels], fromStore: true };
+  const refresh = async (source: CredentialSource, signal?: AbortSignal): Promise<Array<Model<any>>> => {
+    signal?.throwIfAborted();
+    const json = await client.fetchAvailableModels(source, signal);
+    signal?.throwIfAborted();
+    const catalog = parseAvailableModels(json);
+    const models = buildDynamicPublicModels(catalog);
+    if (models.length === 0) throw new Error("No models were returned.");
+    if (!writeJsonAtomically(cacheFile, {
+      models,
+      [PRIVATE_SNAPSHOT_KEY]: toPersistedSnapshot(snapshotFromCatalog(catalog)),
+    }, 0o600)) {
+      throw new Error(`Could not save Antigravity model cache: ${cacheFile}`);
     }
-
-    if (options?.offline || options?.signal?.aborted) {
-      return { models: [], fromStore: false };
-    }
-
-    const authJson = readJsonFileSafe(path.join(agentDir, "auth.json"));
-    const authSource = resolveAuthEntryToSource(authJson?.[PROVIDER_ID]);
-    if (!authSource) {
-      return { models: [], fromStore: false };
-    }
-
-    const timeoutMs = options?.timeoutMs ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS;
-    const controller = new AbortController();
-    const onExternalAbort = () => {
-      controller.abort(options?.signal?.reason ?? new Error("Bootstrap aborted"));
-    };
-    if (options?.signal) {
-      options.signal.addEventListener("abort", onExternalAbort, { once: true });
-    }
-    const timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            controller.abort(new Error("Antigravity bootstrap timed out"));
-          }, timeoutMs)
-        : undefined;
-    if (timer && typeof timer.unref === "function") {
-      timer.unref();
-    }
-
-    try {
-      const configFile = defaultConfigFile(process.env, agentDir);
-      const resolvedCreds = await resolveOrRefreshCredentialSource(authSource, {
-        signal: controller.signal,
-        fetchImpl: options?.fetchImpl ?? defaultFetchImpl,
-        clientOptions: { configFile },
-      });
-      if (!resolvedCreds) {
-        return { models: [], fromStore: false };
-      }
-
-      const effectiveClient =
-        options?.client ??
-        (options?.fetchImpl || (options?.agentDir && !deps?.client)
-          ? createAntigravityClient({ configFile, fetch: options?.fetchImpl ?? defaultFetchImpl })
-          : client);
-      const packedSource: CredentialSource = {
-        apiKey: JSON.stringify({
-          token: resolvedCreds.token,
-          projectId: resolvedCreds.projectId,
-        }),
-      };
-
-      const json = await effectiveClient.fetchAvailableModels(packedSource, controller.signal);
-      const catalog = parseAvailableModels(json);
-      record(catalog);
-      return { models: buildDynamicPublicModels(catalog), fromStore: false };
-    } catch {
-      return { models: [], fromStore: false };
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      options?.signal?.removeEventListener("abort", onExternalAbort);
-    }
-  };
-
-  const refreshGeneration = async (
-    doRefresh: () => unknown,
-  ): Promise<CatalogRefreshOutcome> => {
-    const versionBefore = generation.version;
-    await doRefresh();
-    const { items, version } = generation;
-    if (!items) return { status: "failed" };
-    return { status: version === versionBefore ? "stale" : "fresh", catalog: items };
+    record(catalog);
+    return models;
   };
 
   return {
@@ -800,26 +624,12 @@ export function createModelCatalog(deps?: {
     record,
     restore,
     toPersisted,
+    loadCachedModels,
     refresh,
-    bootstrapFromDiskOrAuth,
-    refreshGeneration,
     getWebSearchModelId: () => generation.snapshot.webSearchModelIds?.[0],
     resolvePlan: (publicModelId, effort) =>
       resolveModelPlan(publicModelId, effort, generation.snapshot),
     formatList: () =>
       generation.items ? formatModelsList(generation.items) : "No models available.",
   };
-}
-
-/**
- * Bootstraps an Antigravity ModelCatalog from disk (`models-store.json`) or `auth.json`.
- */
-export async function bootstrapCatalogFromDiskOrAuth(
-  options?: BootstrapCatalogOptions & { catalog?: ModelCatalog },
-): Promise<BootstrapCatalogResult & { catalog: ModelCatalog }> {
-  const catalog =
-    options?.catalog ??
-    createModelCatalog({ client: options?.client, fetchImpl: options?.fetchImpl });
-  const result = await catalog.bootstrapFromDiskOrAuth(options);
-  return { ...result, catalog };
 }
