@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -86,11 +87,11 @@ export function resolveAntigravityUserAgent(file = defaultConfigFile()): string 
  * Atomically writes JSON, preserving existing permissions unless a mode is supplied.
  */
 export function writeJsonAtomically(file: string, data: unknown, mode?: number): boolean {
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const existingMode = fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : undefined;
-    const fd = fs.openSync(tmp, "w", mode ?? existingMode);
+    const fd = fs.openSync(tmp, "wx", mode ?? existingMode);
     try {
       if (mode !== undefined) fs.fchmodSync(fd, mode);
       fs.writeFileSync(fd, `${JSON.stringify(data, null, 2)}\n`, "utf-8");

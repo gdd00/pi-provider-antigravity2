@@ -14,10 +14,11 @@ import {
 import { SettingsList } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { bindProviderAfk } from "./afk.ts";
-import { getApiKey, loginAntigravity, refreshAntigravityToken, syncAntigravityClient } from "./auth.ts";
+import { AntigravityAuthError, getApiKey, loginAntigravity, refreshAntigravityToken, syncAntigravityClient } from "./auth.ts";
 import { createAntigravityCommands } from "./commands.ts";
 import { getAgentDir } from "./config.ts";
 import { PROVIDER_API } from "./constants.ts";
+import { importAgyLogin } from "./import-agy.ts";
 import { initializePromptSync } from "./prompts.ts";
 import { createModelCatalog } from "./model-catalog.ts";
 import {
@@ -105,6 +106,10 @@ export default function antigravityProviderExtension(pi: ExtensionAPI) {
       registerModels(models);
     },
     syncClient: (signal) => syncAntigravityClient(afk.signal(signal), afk.fetch),
+    importAgy: (signal, confirmReplace) => {
+      if (isOfflineMode()) throw new AntigravityAuthError("Cannot import agy login in offline mode.");
+      return importAgyLogin(afk.signal(signal), afk.fetch, { confirmReplace });
+    },
     uiDeps: {
       getSettingsListTheme,
       createSettingsList: (items, maxVisible, theme, onChange, onCancel) =>

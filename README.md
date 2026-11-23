@@ -18,7 +18,7 @@ An **Antigravity (Google Cloud Code Assist `v1internal`)** provider extension fo
 This extension is **strictly a Pi provider, auth, and protocol adapter**:
 
 - **⚙️ Full Pi Core Agent Loop & Built-in Tools**: All conversation turns, context management, reasoning, and native tool execution (`read`, `bash`, `edit`, `write`, etc.) are **100% executed by `pi` itself**.
-- **Optional `agy` Setup**: Pi runs conversations and refreshes tokens itself, with no third-party runtime npm dependencies. On Linux, the extension can run `agy` during `/login antigravity` or `/antigravity sync-client` to refresh its OAuth client configuration.
+- **Optional `agy` Setup**: Pi runs conversations and refreshes tokens itself, with no third-party runtime npm dependencies. On Linux, the extension can run `agy` during `/login antigravity`, `/antigravity sync-client`, or `/antigravity import-agy` to identify its OAuth client configuration.
 - **🌐 Direct Cloud Code Assist HTTP/SSE**: Speaks directly to `https://daily-cloudcode-pa.googleapis.com/v1internal` over native `fetch`, supporting streaming responses, `xhigh` thinking levels (e.g. `thinkingLevel: 100`), multi-turn `thoughtSignature` preservation, and cross-family tool history compatibility.
 
 ---
@@ -181,6 +181,12 @@ Log in, fetch the model list, then select an `antigravity` model:
 
 Only `/antigravity models` and `/antigravity refresh` fetch the Antigravity catalog. Startup, `/model`, and `/scoped-models` use the last saved list. For a new headless installation, seed the cache with one of those commands in an interactive session or copy `pi-provider-antigravity-models.json` into the agent directory. Existing entries in Pi's `models-store.json` still work as a fallback.
 
+#### Import an existing `agy` login (Linux)
+
+Run `/antigravity import-agy` in Pi if you are already signed into local `agy` with a personal Google account. The command checks the current user's Secret Service using `busctl`, reads the unlocked entry with `secret-tool` (libsecret), or checks the private fallback file at `~/.gemini/antigravity-cli/antigravity-oauth-token` when no keyring entry exists. It verifies token renewal before saving. Replacing an existing Pi login requires confirmation.
+
+The command does not change the `agy` login or provider config. It saves the imported login and matching OAuth client pair in Pi's owner-only `auth.json`; explicit OAuth environment overrides still take precedence. This unofficial import may stop working if `agy` changes its credential format. No `sync-client` is needed after a successful import. If no Antigravity models are cached, run `/antigravity refresh` and then select one with `/model`. If models are already available, go straight to `/model`.
+
 #### 🪪 Headless Login with a Refresh Token (`auth.json`)
 
 If you already have a Google OAuth refresh token (for headless servers, containers, or migrated credentials), you can skip browser login by writing directly to `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`):
@@ -211,6 +217,7 @@ After 90 seconds idle at startup or after an agent run settles (including errors
 - **`/antigravity models`**: Refresh and display recommended/available models with context window and remaining quota
 - **`/antigravity refresh`**: Refresh the same catalog without displaying the list
 - **`/antigravity sync-client`**: Sync OAuth Client ID, Secret, and User-Agent from local `agy`. If the Client ID changed and Pi is already logged in, the command can update the User-Agent but keeps the existing OAuth pair; run `/login antigravity` to switch.
+- **`/antigravity import-agy`**: Import the current local `agy` personal OAuth login on Linux without opening a browser.
 - **`/antigravity settings`**: Interactive settings dialog (persisted to `~/.pi/agent/pi-provider-antigravity.json`):
   - `Quota footer` (`"off"` / `"smart"` / `"all"`): Status footer quota display mode
   - `Unsigned tool calls` (`"fail"` / `"skip"`): Handling policy when cross-provider history loses a `thoughtSignature`

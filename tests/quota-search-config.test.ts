@@ -367,7 +367,7 @@ test("search rejects ungrounded answers and does not retry HTTP errors with a di
   })));
 });
 
-test("commands module completes subcommands and routes usage, models, sync-client, login, and help", async () => {
+test("commands module completes subcommands and routes usage, models, sync-client, import-agy, login, and help", async () => {
   const catalog = createModelCatalog();
   catalog.record({
     models: {
@@ -393,7 +393,11 @@ test("commands module completes subcommands and routes usage, models, sync-clien
 
   const signal = new AbortController().signal;
   let syncs = 0;
+  let imports = 0;
   let refreshes = 0;
+  let registryRefreshes = 0;
+  let availableModels: { provider: string }[] = [{ provider: "other" }];
+  let confirm = false;
   const cmds = createAntigravityCommands({
     quotaStatus,
     catalog,
@@ -406,9 +410,14 @@ test("commands module completes subcommands and routes usage, models, sync-clien
       syncs++;
       return { oauth: "login-required", userAgent: "updated" };
     },
+    async importAgy(commandSignal, confirmReplace) {
+      assert.equal(commandSignal, signal);
+      imports++;
+      return await confirmReplace() ? "imported" : "cancelled";
+    },
   });
   const allNames = cmds.complete("")?.map((c) => c.value);
-  assert.deepEqual(allNames, ["usage", "models", "refresh", "sync-client", "settings", "websearch", "login"]);
+  assert.deepEqual(allNames, ["usage", "models", "refresh", "sync-client", "import-agy", "settings", "websearch", "login"]);
   assert.equal(cmds.complete("sync-")?.[0]?.description,
     "Sync OAuth client credentials and User-Agent from local agy");
   assert.deepEqual(
@@ -421,7 +430,9 @@ test("commands module completes subcommands and routes usage, models, sync-clien
   const ctx: any = {
     signal,
     hasUI: true,
+    waitForIdle: async () => {},
     ui: {
+      confirm: async () => confirm,
       notify: (text: string, level?: string) => notifications.push({ text, level }),
       setEditorText: (text: string) => {
         editorText = text;
@@ -429,7 +440,12 @@ test("commands module completes subcommands and routes usage, models, sync-clien
     },
     modelRegistry: {
       getApiKeyForProvider: async () => JSON.stringify({ token: "ya29.ok", projectId: "proj-1" }),
-      refresh: async () => assert.fail("commands must not use Pi's automatic refresh path"),
+      getAvailable: () => availableModels,
+      refresh: async (options: unknown) => {
+        assert.deepEqual(options, { providers: ["antigravity"], allowNetwork: false, signal });
+        registryRefreshes++;
+        return { aborted: false, errors: new Map() };
+      },
     },
   };
 
@@ -445,6 +461,23 @@ test("commands module completes subcommands and routes usage, models, sync-clien
   assert.equal(syncs, 1);
   assert.ok(notifications.some(({ level, text }) =>
     level === "warning" && text.includes("/login antigravity") && text.includes("User-Agent updated.")));
+  assert.equal(registryRefreshes, 0);
+  await cmds.handle("import-agy unexpected", ctx);
+  assert.equal(imports, 0);
+  await cmds.handle("import-agy", ctx);
+  assert.equal(registryRefreshes, 0);
+  assert.match(notifications.at(-1)!.text, /Existing Pi login kept/);
+  confirm = true;
+  await cmds.handle("import-agy", ctx);
+  assert.equal(imports, 2);
+  assert.equal(registryRefreshes, 1);
+  assert.match(notifications.at(-1)!.text, /Run \/antigravity refresh to load models, then select one with \/model\. No sync-client needed\./);
+  availableModels = [{ provider: "antigravity" }];
+  await cmds.handle("import-agy", ctx);
+  assert.equal(registryRefreshes, 2);
+  assert.equal(notifications.at(-1)!.text,
+    "agy login imported. Use /model to select an Antigravity model. No sync-client needed.");
+  assert.equal(refreshes, 2, "Import should not fetch the model catalog");
   await cmds.handle("login", ctx);
   await cmds.handle("unknown-cmd", ctx);
 

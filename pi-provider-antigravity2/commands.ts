@@ -6,6 +6,8 @@ import {
   syncAntigravityClient,
 } from "./auth.ts";
 import { notifyCommandOutput, openSettings, type SettingsUiDeps } from "./config.ts";
+import { PROVIDER_ID } from "./constants.ts";
+import type { importAgyLogin } from "./import-agy.ts";
 import type { ModelCatalog } from "./model-catalog.ts";
 import type { AntigravityClient } from "./protocol.ts";
 import { createQuotaStatus, type QuotaStatus } from "./quota-status.ts";
@@ -24,6 +26,7 @@ export interface AntigravityCommandsDeps {
   refreshModels(ctx: ExtensionCommandContext): Promise<void>;
   client?: AntigravityClient;
   syncClient?: typeof syncAntigravityClient;
+  importAgy?: (signal: AbortSignal | undefined, confirmReplace: () => Promise<boolean>) => ReturnType<typeof importAgyLogin>;
   uiDeps?: SettingsUiDeps;
 }
 
@@ -114,6 +117,43 @@ async function runSyncClientSubcommand(
   }
 }
 
+async function runImportAgySubcommand({ ctx, importAgy, subArgs }: SubcommandContext): Promise<void> {
+  if (subArgs) {
+    notifyCommandOutput(ctx, "Usage: /antigravity import-agy", "warning");
+    return;
+  }
+  if (!importAgy) {
+    notifyCommandOutput(ctx, "agy login import is unavailable.", "error");
+    return;
+  }
+  try {
+    await ctx.waitForIdle();
+    const result = await importAgy(ctx.signal, async () =>
+      ctx.hasUI && await ctx.ui.confirm("Replace Pi's Antigravity login?",
+        "Use the account currently signed in to local agy. This does not change the agy login."));
+    if (result === "cancelled") {
+      notifyCommandOutput(ctx, "Import cancelled. Existing Pi login kept.", "info");
+      return;
+    }
+  } catch (error) {
+    if (ctx.signal?.aborted) return;
+    const reason = error instanceof AntigravityAuthError ? ` ${error.message}` : "";
+    notifyCommandOutput(ctx, `Failed to import agy login.${reason}`, "error");
+    return;
+  }
+
+  try {
+    const result = await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: false, signal: ctx.signal });
+    if (result?.aborted || result?.errors.get(PROVIDER_ID)) throw new Error();
+    const hasModels = ctx.modelRegistry.getAvailable().some((model) => model.provider === PROVIDER_ID);
+    notifyCommandOutput(ctx, hasModels
+      ? "agy login imported. Use /model to select an Antigravity model. No sync-client needed."
+      : "agy login imported. Run /antigravity refresh to load models, then select one with /model. No sync-client needed.");
+  } catch {
+    notifyCommandOutput(ctx, "agy login saved. Restart Pi, then use /model. If no Antigravity models are listed, run /antigravity refresh. No sync-client needed.", "warning");
+  }
+}
+
 function runLoginSubcommand(ctx: ExtensionCommandContext): void {
   if (ctx.hasUI) {
     ctx.ui.setEditorText("/login antigravity");
@@ -143,6 +183,11 @@ const SUBCOMMANDS: readonly SubcommandDef[] = Object.freeze([
     name: "sync-client",
     description: "Sync OAuth client credentials and User-Agent from local agy",
     run: ({ ctx, syncClient }) => runSyncClientSubcommand(ctx, syncClient),
+  },
+  {
+    name: "import-agy",
+    description: "Import the local agy Google OAuth login (Linux)",
+    run: runImportAgySubcommand,
   },
   {
     name: "settings",

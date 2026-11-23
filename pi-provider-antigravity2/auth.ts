@@ -30,6 +30,7 @@ export interface OAuthCredentialLike {
   refresh?: string;
   expires?: number;
   type?: string;
+  agyOAuthClient?: OAuthClientCredentials;
 }
 
 export type CredentialSource =
@@ -247,6 +248,33 @@ async function matchClientSecretFromAgy(
 export interface AntigravityClientSyncResult {
   oauth: "updated" | "unchanged" | "login-required" | "overridden" | "unavailable";
   userAgent: "updated" | "unchanged" | "unavailable";
+}
+
+/** Resolve a client for import without persisting or changing the active Pi client. */
+export async function resolveAgyImportOAuthClient(
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+  options?: Omit<OAuthClientOptions, "clientId" | "clientSecret">,
+): Promise<OAuthClientCredentials> {
+  const env = options?.env ?? process.env;
+  if (env.ANTIGRAVITY_CLIENT_ID?.trim() || env.ANTIGRAVITY_CLIENT_SECRET?.trim()) {
+    return resolveOAuthClientCredentials(options);
+  }
+
+  let configured: OAuthClientCredentials | undefined;
+  try {
+    configured = resolveOAuthClientCredentials(options);
+  } catch (error) {
+    if (!(error instanceof AntigravityAuthError)) throw error;
+  }
+  const agy = await readLocalAgy(options, signal);
+  const clientId = agy && await detectAgyLoginClientId(agy.file, REDIRECT_URI, signal);
+  if (configured && (!clientId || clientId === configured.clientId)) return configured;
+  if (agy && clientId) {
+    const clientSecret = await matchClientSecretFromAgy(clientId, agy.bytes, fetchImpl, signal);
+    if (clientSecret) return { clientId, clientSecret };
+  }
+  throw new AntigravityAuthError("Could not identify the local agy OAuth client. Check agy or configure OAuth client credentials.");
 }
 
 function hasStoredOAuthLogin(configFile: string): boolean {
@@ -585,17 +613,25 @@ export async function loginAntigravity(
  * prefix and preserving an existing non-fallback project ID if lookup fails.
  */
 export async function refreshAntigravityToken(
-  credentials: OAuthCredentials,
+  credentials: OAuthCredentials & Pick<OAuthCredentialLike, "agyOAuthClient">,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
   clientOptions?: OAuthClientOptions,
-): Promise<OAuthCredentials> {
+): Promise<OAuthCredentials & Pick<OAuthCredentialLike, "agyOAuthClient">> {
   const normalizedRefresh = normalizeRefreshToken(credentials.refresh || "");
   if (!normalizedRefresh) {
     throw new AntigravityAuthError("Missing OAuth refresh token. Run /login antigravity first.");
   }
 
-  const { clientId, clientSecret } = resolveOAuthClientCredentials(clientOptions);
+  const boundClient = credentials.agyOAuthClient;
+  const env = clientOptions?.env ?? process.env;
+  const hasOverride = clientOptions?.clientId?.trim() || clientOptions?.clientSecret?.trim() ||
+    env.ANTIGRAVITY_CLIENT_ID?.trim() || env.ANTIGRAVITY_CLIENT_SECRET?.trim();
+  const { clientId, clientSecret } = !hasOverride && boundClient &&
+      typeof boundClient.clientId === "string" && boundClient.clientId.trim() &&
+      typeof boundClient.clientSecret === "string" && boundClient.clientSecret.trim()
+    ? boundClient
+    : resolveOAuthClientCredentials(clientOptions);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -622,6 +658,10 @@ export async function refreshAntigravityToken(
     expires_in?: number;
   };
 
+  if (typeof tokens?.access_token !== "string" || !tokens.access_token.trim()) {
+    throw new AntigravityAuthError("Google did not return an OAuth access token.");
+  }
+
   let existingProjectId = FALLBACK_PROJECT_ID;
   if (credentials.access) {
     const existing = parseStoredCredentials(credentials.access);
@@ -643,6 +683,7 @@ export async function refreshAntigravityToken(
     refresh: nextRefresh,
     access: JSON.stringify({ token: tokens.access_token, projectId }),
     expires: Date.now() + (tokens.expires_in || 3600) * 1000,
+    ...(boundClient && { agyOAuthClient: boundClient }),
   };
 }
 
@@ -772,6 +813,7 @@ export async function resolveOrRefreshCredentialSource(
           refresh: cred.refresh!,
           access: typeof cred.access === "string" ? cred.access : "",
           expires: typeof cred.expires === "number" ? cred.expires : 0,
+          agyOAuthClient: cred.agyOAuthClient,
         },
         options?.signal,
         options?.fetchImpl,

@@ -18,7 +18,7 @@
 本扩展**纯粹是一个 Pi Provider / Auth / 协议适配层**：
 
 - **⚙️ 完全使用 Pi Core 的 Agent Loop 与内置工具**：所有对话循环、上下文管理、思考过程，以及 `read`、`bash`、`edit`、`write` 等原生工具调用，**100% 由 `pi` 自身执行**。
-- **`agy` 仅用于可选登录配置**：日常对话和令牌刷新由 Pi 完成，没有第三方运行时 npm 依赖。Linux 上仅在 `/login antigravity` 或 `/antigravity sync-client` 时尝试运行 `agy`，刷新 OAuth 客户端配置。
+- **`agy` 仅用于可选登录配置**：日常对话和令牌刷新由 Pi 完成，没有第三方运行时 npm 依赖。Linux 上仅在 `/login antigravity`、`/antigravity sync-client` 或 `/antigravity import-agy` 时尝试运行 `agy`，识别 OAuth 客户端配置。
 - **🌐 直连 Cloud Code Assist HTTP/SSE**：直接通过原生 `fetch` 对接 `https://daily-cloudcode-pa.googleapis.com/v1internal`，原生支持流式输出、`xhigh` 思考等级（如 `thinkingLevel: 100`）、多轮 `thoughtSignature` 签名保留与跨模型族工具历史兼容。
 
 ---
@@ -181,7 +181,13 @@ pi -e /path/to/repo
 
 只有 `/antigravity models` 和 `/antigravity refresh` 会联网拉取 Antigravity 模型目录。启动、`/model` 和 `/scoped-models` 都使用已保存的目录。首次无头部署时，先在交互会话中刷新一次，或将已有的 `pi-provider-antigravity-models.json` 复制到 Pi 的 agent 目录。旧版 Pi `models-store.json` 里的缓存仍可作为回退。
 
-#### 🪪 使用 Refresh Token（RT）免浏览器登录（`auth.json`）
+#### 导入已有的 `agy` 登录（Linux）
+
+如果已在本机 `agy` 登录个人 Google 账号，在 Pi 中执行 `/antigravity import-agy`。命令通过 `busctl` 检查当前用户的 Secret Service，用 `secret-tool`（libsecret）读取已解锁的条目；没有钥匙串条目时，检查私有后备文件 `~/.gemini/antigravity-cli/antigravity-oauth-token`。续期验证通过才保存。已有 Pi 登录时，覆盖前需确认。
+
+命令不会改动 `agy` 登录或 Provider 配置。导入的登录和匹配的 OAuth 客户端凭据保存在仅当前用户可读写的 Pi `auth.json` 中；显式设置的 OAuth 环境变量仍优先。此功能依赖 `agy` 的凭据格式，升级后可能失效。导入成功后不需要执行 `sync-client`。如果没有缓存的 Antigravity 模型，先执行 `/antigravity refresh`，再用 `/model` 选择；已有可用模型就直接用 `/model`。
+
+#### 🪪 使用 Refresh Token（RT）免浏览器登录（`auth.json`)
 
 如果你已经有现成的 Google OAuth Refresh Token（例如无头服务器、容器环境或从已有凭证迁移），无需走浏览器交互登录，直接写入 `$PI_CODING_AGENT_DIR/auth.json`（默认 `~/.pi/agent/auth.json`）即可：
 
@@ -211,6 +217,7 @@ pi -e /path/to/repo
 - **`/antigravity models`**：刷新并显示推荐/可用模型、上下文窗口与剩余配额
 - **`/antigravity refresh`**：刷新同一份模型目录，不打印列表
 - **`/antigravity sync-client`**：从本机 `agy` 同步 OAuth Client ID、Secret 和 User-Agent，已登录且 Client ID 变化时，只更新 User-Agent，保留原 OAuth 凭据；执行 `/login antigravity` 切换。
+- **`/antigravity import-agy`**：Linux 上免浏览器导入本机 `agy` 的个人 Google OAuth 登录。
 - **`/antigravity settings`**：交互式配置界面（写入 `~/.pi/agent/pi-provider-antigravity.json`）：
   - `Quota footer`（`"off"` / `"smart"` / `"all"`）：底部状态栏配额显示模式
   - `Unsigned tool calls`（`"fail"` / `"skip"`）：处理跨 Provider 丢失 `thoughtSignature` 的策略

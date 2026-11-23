@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] - 2026-11-23
+
+- Add Linux-only `/antigravity import-agy` to verify and import an existing personal Google OAuth login without opening a browser or running `sync-client`.
+- After import, point users to `/model` when models are already available, or to `/antigravity refresh` when the model cache is empty.
+
 ## [0.2.1] - 2026-11-22
 
 - Fetch the Antigravity model catalog only via `/antigravity models` or `/antigravity refresh`. Startup and Pi's model selectors use the local cache; selecting a model does not fetch quota.
