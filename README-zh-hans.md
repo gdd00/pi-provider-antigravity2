@@ -209,7 +209,9 @@ pi -e /path/to/repo
 
 ### 空闲断连
 
-空闲断连由独立扩展 `pi-provider-afk` 提供。一起安装后，默认空闲 90 秒即断连；打开 `/provider-afk` → **Providers**，选中 `antigravity` 并按 Enter 可切换为保持连接。不安装则没有空闲计时器。
+推荐安装独立扩展 `pi-provider-afk`，以减少 Pi 空闲时不必要的后台请求。目前尚不清楚这类请求是否是导致账号封禁的因素之一，安装该扩展也不代表可以避免封禁。
+
+默认空闲 90 秒后断连。打开 `/provider-afk` → **Providers**，选中 `antigravity` 并按 Enter 可切换为保持连接。不安装则没有空闲计时器。
 
 ### 💬 内置命令与工具
 

@@ -209,7 +209,9 @@ If you already have a Google OAuth refresh token (for headless servers, containe
 
 ### Idle disconnect
 
-Idle disconnect is provided by the optional standalone `pi-provider-afk` extension. Install it alongside this provider for idle disconnect (default: 90 seconds); open `/provider-afk` → **Providers** and toggle `antigravity` to keep it connected. Without it, Antigravity has no idle timer.
+We recommend installing `pi-provider-afk` to reduce unnecessary background requests while Pi is idle. Whether idle background traffic contributes to account bans is unknown; this extension is not a safeguard against bans.
+
+The default idle timeout is 90 seconds. Open `/provider-afk` → **Providers** and toggle `antigravity` to keep it connected. Without it, Antigravity has no idle timer.
 
 ### 💬 Built-in Commands & Tool
 
