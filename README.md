@@ -209,7 +209,7 @@ If you already have a Google OAuth refresh token (for headless servers, containe
 
 ### Idle disconnect
 
-After 90 seconds idle at startup or after an agent run settles (including errors and Escape), the extension aborts outstanding Antigravity requests and blocks background traffic, including quota refresh and cache warming. With an Antigravity model selected, Pi displays `pi-provider-antigravity2: disconnected (AFK)` above the editor. Sending a new prompt or running an `/antigravity` command resumes access on demand; no login is required. Other providers are unaffected.
+Idle disconnect is provided by the optional standalone `pi-provider-afk` extension. Install it alongside this provider for idle disconnect (default: 90 seconds); open `/provider-afk` → **Providers** and toggle `antigravity` to keep it connected. Without it, Antigravity has no idle timer.
 
 ### 💬 Built-in Commands & Tool
 

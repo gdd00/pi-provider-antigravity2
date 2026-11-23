@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Move the 90-second idle policy to the optional `pi-provider-afk` extension. Antigravity still cancels its own requests when the policy applies.
+
 ## [0.3.0] - 2026-11-23
 
 - Add Linux-only `/antigravity import-agy` to verify and import an existing personal Google OAuth login without opening a browser or running `sync-client`.

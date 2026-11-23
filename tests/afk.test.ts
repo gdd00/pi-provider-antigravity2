@@ -6,86 +6,30 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { bindProviderAfk } from "../pi-provider-antigravity2/afk.ts";
 
-function harness(fetchImpl: typeof fetch = fetch, mode = "tui") {
-  const handlers = new Map<string, Function>();
-  const widgets: Array<string[] | undefined> = [];
-  const ctx = {
-    mode,
-    model: { provider: "antigravity" },
-    isIdle: () => true,
-    ui: { setWidget: (_key: string, content?: string[]) => widgets.push(content) },
-  };
+function harness(fetchImpl: typeof fetch = fetch) {
+  let state!: (event: object) => void;
+  let shutdown!: () => void;
   const afk = bindProviderAfk({
-    on: (name: string, fn: Function) => handlers.set(name, fn),
+    events: { on: (_: string, fn: typeof state) => { state = fn; }, emit() {} },
+    on: (name: string, fn: () => void) => { if (name === "session_shutdown") shutdown = fn; },
   } as unknown as ExtensionAPI, fetchImpl);
-  const emit = (name: string, event = {}) => handlers.get(name)?.(event, ctx);
-  emit("session_start");
-  return { afk, emit, ctx, widgets };
+  return { afk, state, shutdown };
 }
 
-test("90 seconds from final settle, not turn end, retry backoff, or prompt submission", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { afk, emit, widgets } = harness();
-  const tick = (ms: number) => t.mock.timers.tick(ms);
-  tick(89_999);
-  emit("input");
-  tick(89_999);
-  assert.equal(afk.signal().aborted, false);
-
-  for (const aborted of [false, true]) {
-    emit("agent_start");
-    emit("turn_end");
-    emit("agent_end");
-    tick(180_000);
-    assert.equal(afk.signal().aborted, false);
-    emit("agent_settled", { aborted });
-    tick(89_999);
-    assert.equal(afk.signal().aborted, false);
-    tick(1);
-    assert.equal(afk.signal().aborted, true);
-    assert.deepEqual(widgets.at(-1), ["pi-provider-antigravity2: disconnected (AFK)"]);
-    emit("input");
-    assert.equal(afk.signal().aborted, false);
-    assert.equal(widgets.at(-1), undefined);
-  }
-  emit("session_shutdown");
-});
-
-test("AFK blocks background fetch and warming until activity; never shows on another provider", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("optional policy, caller abort and shutdown", async () => {
   let calls = 0;
-  const { afk, emit, ctx, widgets } = harness(async () => {
-    ++calls;
-    return new Response();
-  });
-  ctx.model = { provider: "other" };
-  emit("model_select", { model: ctx.model });
-  t.mock.timers.tick(90_000);
-  assert.deepEqual(widgets, []);
-  assert.equal(emit("cache_warming_decision"), undefined);
-  ctx.model = { provider: "antigravity" };
-  emit("model_select", { model: ctx.model });
-  assert.deepEqual(emit("cache_warming_decision"), { action: "stop" });
-  const old = afk.signal();
-  await assert.rejects(afk.fetch("https://example.invalid"), /disconnected \(AFK\)/);
-  assert.equal(calls, 0);
-  afk.activity(); // manual provider command
-  assert.equal(emit("cache_warming_decision"), undefined);
-  await assert.rejects(afk.fetch("https://example.invalid", { signal: old }), /disconnected \(AFK\)/);
+  const { afk, state, shutdown } = harness(async () => { calls++; return new Response(); });
   await afk.fetch("https://example.invalid");
-  assert.equal(calls, 1);
-
-  const caller = new AbortController();
-  const combined = afk.signal(caller.signal);
-  caller.abort(new Error("caller cancelled"));
-  await assert.rejects(afk.fetch("https://example.invalid", { signal: combined }), /caller cancelled/);
-  assert.equal(afk.signal().aborted, false);
-  emit("session_shutdown");
-  afk.activity();
+  state({ idle: true, exempt: [] });
+  const old = afk.signal();
+  await assert.rejects(afk.fetch("https://example.invalid"), /AFK/);
+  state({ idle: true, exempt: ["antigravity"] });
+  await afk.fetch("https://example.invalid");
+  await assert.rejects(afk.fetch("https://example.invalid", { signal: old }), /AFK/);
+  shutdown();
+  state({ idle: false, exempt: [] });
   await assert.rejects(afk.fetch("https://example.invalid"), /session closed/);
-  t.mock.timers.tick(90_000);
-  assert.equal(calls, 1);
-  assert.equal(widgets.length, 2);
+  assert.equal(calls, 2);
 });
 
 test("AFK closes a live response body/socket even after fetch returned headers", { timeout: 5000 }, async (t) => {
@@ -99,12 +43,11 @@ test("AFK closes a live response body/socket even after fetch returned headers",
   await once(server, "listening");
   t.after(() => { server.closeAllConnections(); server.close(); });
 
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { afk, widgets } = harness(fetch, "print");
+  const { afk, state } = harness();
+  state({ idle: false, exempt: [] });
   const res = await afk.fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
   const body = res.text();
-  t.mock.timers.tick(90_000);
+  state({ idle: true, exempt: [] });
   await assert.rejects(body);
   await closed.promise;
-  assert.deepEqual(widgets, []);
 });
